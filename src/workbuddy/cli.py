@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import os
 import shlex
@@ -16,6 +17,7 @@ MAX_LOGGED_RESPONSE_CHARS = 4000
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_HISTORY_ROWS = 1000
 GIT_CONTEXT_TIMEOUT_SECONDS = 10
+MCP_TIMEOUT_SECONDS = 30
 READONLY_GIT_SUBCMDS = frozenset(
     {
         "status",
@@ -89,6 +91,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Read-only git helper: loads repo context, runs a Claude-proposed git read "
             "command after y/N confirmation. Write subcommands are blocked"
+        ),
+    )
+    mode_group.add_argument(
+        "--mcp-list-tools",
+        action="store_true",
+        default=False,
+        help=(
+            "Connect to the MCP server given by --mcp-server, print its advertised tools, "
+            "then exit. Does NOT call Claude or execute any tool"
+        ),
+    )
+    parser.add_argument(
+        "--mcp-server",
+        default=None,
+        help=(
+            "Shell command (parsed via shlex.split) that spawns an MCP server speaking "
+            "stdio JSON-RPC. Required when --mcp-list-tools is set"
         ),
     )
     return parser
@@ -181,6 +200,59 @@ def _load_git_context() -> str:
             return _GIT_CONTEXT_UNAVAILABLE
         parts.append(f"[{label}: {result.stdout.strip()}]")
     return "\n".join(parts)
+
+
+async def _async_list_tools(server_argv: list[str]):
+    from mcp import StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=server_argv[0], args=server_argv[1:])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return list(getattr(result, "tools", []) or [])
+
+
+def _run_mcp_list_tools(args) -> int:
+    raw = args.mcp_server or ""
+    try:
+        server_argv = shlex.split(raw)
+    except ValueError as exc:
+        print(f"error: invalid --mcp-server: {exc}", file=sys.stderr)
+        return 5
+    if not server_argv:
+        print("error: invalid --mcp-server: empty command", file=sys.stderr)
+        return 5
+
+    if args.task:
+        print("note: --mcp-list-tools mode ignores the task argument", file=sys.stderr)
+
+    try:
+        tools = asyncio.run(
+            asyncio.wait_for(
+                _async_list_tools(server_argv), timeout=MCP_TIMEOUT_SECONDS
+            )
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        print(
+            f"error: MCP server did not respond within {MCP_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return 6
+    except Exception as exc:
+        print(
+            f"error: MCP error: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 5
+
+    for tool in tools:
+        name = getattr(tool, "name", "") or ""
+        description = getattr(tool, "description", None) or ""
+        print(f"{name}: {description}")
+    return 0
 
 
 def _run_git(args, text: str) -> int:
@@ -305,6 +377,19 @@ def _run_exec(args, text: str) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.mcp_list_tools and args.mcp_server is None:
+        print("error: --mcp-list-tools requires --mcp-server", file=sys.stderr)
+        return 5
+    if args.mcp_server is not None and not args.mcp_list_tools:
+        print(
+            "error: --mcp-server is only meaningful with --mcp-list-tools",
+            file=sys.stderr,
+        )
+        return 5
+
+    if args.mcp_list_tools:
+        return _run_mcp_list_tools(args)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:

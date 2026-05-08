@@ -45,6 +45,14 @@ workbuddy --git "what changed on this branch since main"
 
 `--git` enforces a read-only subcommand allowlist (`status`, `log`, `diff`, `show`, `blame`, `rev-parse`, `ls-files`, `describe`, `shortlog`, `name-rev`). Write subcommands like `commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `clean`, etc. are rejected before the confirmation prompt is even shown — an accidental `y` cannot trigger a write. `branch` and `reflog` are intentionally excluded from the allowlist because they have write variants (`branch -d`/`-D`/`-m`, `reflog expire`/`delete`); for read-only branch or reflog inspection, fall back to `--exec` and confirm the proposed plain-read command. `--git` and `--exec` are mutually exclusive.
 
+Pass `--mcp-list-tools --mcp-server "<cmd>"` to inspect an MCP server's advertised tools:
+
+```bash
+workbuddy --mcp-list-tools --mcp-server "python -m my_mcp_server" .
+```
+
+This mode connects to the MCP server over stdio, performs the standard initialize / list-tools handshake, and prints one line per tool (`name: description`). It does NOT call Claude and does NOT execute any tool — it is pure inspection. The task argument is required by argparse but ignored. A future slice will add tool execution. `--mcp-list-tools` is mutually exclusive with `--exec` and `--git`.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.

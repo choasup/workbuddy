@@ -188,6 +188,118 @@ def test_config_silent_when_default_model_absent(tmp_path, monkeypatch, capsys):
     assert captured.err == ""
 
 
+def _make_async_returning(tools):
+    async def _fake(server_argv):
+        return tools
+
+    return _fake
+
+
+async def _fake_async_raises_boom(server_argv):
+    raise RuntimeError("boom")
+
+
+def test_mcp_list_tools_happy_path(monkeypatch, capsys):
+    tools = [
+        types.SimpleNamespace(name="echo", description="echo the input"),
+        types.SimpleNamespace(name="add", description="add two numbers"),
+    ]
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _make_async_returning(tools))
+
+    rc = main(["--mcp-list-tools", "--mcp-server", "fake-server-cmd", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "echo: echo the input" in captured.out
+    assert "add: add two numbers" in captured.out
+
+
+def test_mcp_list_tools_handles_empty_description(monkeypatch, capsys):
+    tools = [types.SimpleNamespace(name="solo", description=None)]
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _make_async_returning(tools))
+
+    rc = main(["--mcp-list-tools", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "solo: " in captured.out
+
+
+def test_mcp_list_tools_requires_mcp_server(capsys):
+    rc = main(["--mcp-list-tools", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "requires --mcp-server" in captured.err
+
+
+def test_mcp_server_alone_requires_list_tools(capsys):
+    rc = main(["--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "only meaningful with --mcp-list-tools" in captured.err
+
+
+def test_mcp_list_tools_protocol_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_async_raises_boom)
+
+    rc = main(["--mcp-list-tools", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "MCP error:" in captured.err
+    assert "boom" in captured.err
+    # NOT a Python traceback dump
+    assert "Traceback" not in captured.err
+
+
+async def _fake_async_timeout(server_argv):
+    raise TimeoutError()
+
+
+def test_mcp_list_tools_timeout(monkeypatch, capsys):
+    """Patch _async_list_tools to raise TimeoutError on its first await — production
+    code's `except (asyncio.TimeoutError, TimeoutError)` catches it and exits 6.
+    Cleaner than intercepting asyncio.run because the real asyncio plumbing runs."""
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_async_timeout)
+
+    rc = main(["--mcp-list-tools", "--mcp-server", "fake", "task"])
+
+    assert rc == 6
+    captured = capsys.readouterr()
+    assert "did not respond within" in captured.err
+
+
+def test_mcp_mutually_exclusive_with_exec(capsys):
+    with pytest.raises(SystemExit) as ei:
+        main(["--mcp-list-tools", "--exec", "task"])
+    assert ei.value.code != 0
+    captured = capsys.readouterr()
+    assert ("not allowed with" in captured.err) or ("--mcp" in captured.err)
+
+
+def test_mcp_mutually_exclusive_with_git(capsys):
+    with pytest.raises(SystemExit) as ei:
+        main(["--mcp-list-tools", "--git", "task"])
+    assert ei.value.code != 0
+    captured = capsys.readouterr()
+    assert ("not allowed with" in captured.err) or ("--mcp" in captured.err)
+
+
+def test_mcp_list_tools_ignores_task_arg(monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    tools = [types.SimpleNamespace(name="x", description="y")]
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _make_async_returning(tools))
+
+    rc = main(["--mcp-list-tools", "--mcp-server", "fake", "please summarize"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "ignores the task argument" in captured.err
+    assert "x: y" in captured.out
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
