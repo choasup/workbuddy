@@ -14,7 +14,7 @@
 - [x] Add `LICENSE` (MIT), declare `[project.optional-dependencies] dev = ["pytest>=7"]`, bump README "Status" from `Pre-v0` to `v0 — feature complete`
 
 ## v0.1
-- [⏳] Persistent local state (config, history) under `~/.workbuddy/`  *(slice 1: config.json with `default_model`; history jsonl follows in a separate round)*
+- [x] Persistent local state (config, history) under `~/.workbuddy/` *(config.json `default_model` + history.jsonl with rotation)*
 - [ ] Shell execution mode with confirmation prompt
 - [ ] Git operations helper
 
