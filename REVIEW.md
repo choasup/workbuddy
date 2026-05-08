@@ -1,36 +1,50 @@
-# Review of f6ad33b
+# Review of 0b0b8b7
 
 ## Verdict
 PASS
 
-## Findings
-- All 13 acceptance criteria met. `pytest -q` → 58 passed, AND `pytest -W error` (warnings as errors) also passes — confirms no resource warnings (no unawaited coroutines, no asyncio cleanup leaks).
-- `mcp>=1.0` correctly added to `dependencies` (not a dev/optional extra). Lazy-import inside `_async_list_tools` is a nice touch: workbuddy's startup is unaffected for non-MCP invocations, and tests can bypass the import entirely by monkey-patching the helper.
-- `MCP_TIMEOUT_SECONDS = 30` is a named module constant, threaded into both `asyncio.wait_for(timeout=...)` and the stderr message — single source of truth.
-- Defensive coding around the SDK shape:
-  - `list(getattr(result, "tools", []) or [])` — handles `tools=None` and missing attribute
-  - `getattr(tool, "name", "") or ""` and `getattr(tool, "description", None) or ""` — handles `None` descriptions and empty names
-  - `except Exception` (broad-but-bounded) wraps anything the MCP SDK throws into a one-line `error: MCP error: <ExcClass>: <msg>` without a traceback
-  - `except (asyncio.TimeoutError, TimeoutError)` — compatible across 3.10 (alias differs) and 3.11+ (where `asyncio.TimeoutError` is just an alias for the builtin `TimeoutError`)
-- argparse mutex group correctly includes all three modes (`--exec`, `--git`, `--mcp-list-tools`); the two new mutex-rejection tests (`test_mcp_mutually_exclusive_with_exec`, `test_mcp_mutually_exclusive_with_git`) verify both pairings.
-- `--mcp-server` correctly lives OUTSIDE the mutex group (it's a value-bearing parameter, not a mode flag); the `--mcp-list-tools` ↔ `--mcp-server` arg-pair check happens explicitly in `main()` with separate-but-symmetric error messages.
-- Early dispatch (`if args.mcp_list_tools: return _run_mcp_list_tools(args)`) happens BEFORE the API-key check, so this mode works without `ANTHROPIC_API_KEY`. Verified by `test_mcp_list_tools_ignores_task_arg` which `monkeypatch.delenv("ANTHROPIC_API_KEY")` and still gets `rc == 0`.
-- The timeout test refactor from intercepting `asyncio.run` to monkey-patching `_async_list_tools` to raise `TimeoutError` directly is cleaner and avoids the unawaited-coroutine warning. The new fake awaits raise on first await, exercising the real `asyncio.run` / `wait_for` plumbing — that's better than mocking the whole asyncio dispatch.
-- Pure inspection — no log.md, no history.jsonl, no Claude API call. This matches the intent of the slice and aligns with how the user's audit trail should look (the user can re-list tools cheaply without polluting their run history).
-- LOC = 1354, within the planner's `~1400` target.
+## Safety property check (the critical one)
+The slice-2 contract was: **all argument-validation errors must short-circuit BEFORE the y/N prompt is shown — a malformed call cannot be confirmed**. Reading `_run_mcp_call_tool` line by line:
 
-## Non-blocking observations (carry-forward for slice 2)
-- `task` positional remains argparse-required, so `workbuddy --mcp-list-tools --mcp-server "..."` fails without a dummy task argument. The `note: --mcp-list-tools mode ignores the task argument` is a band-aid. A future slice could make `task` `nargs="?"` and require it only for the Claude-bound modes. Not blocking — UX papercut, not a safety/correctness issue.
-- If `mcp` isn't installed (corrupt venv), `--mcp-list-tools` produces `error: MCP error: ModuleNotFoundError: ...` via the broad except. The error is informative but the resolution path ("run pip install -e .") isn't surfaced. Optional polish.
-- `_async_list_tools` doesn't propagate the MCP server's stderr to the user. If the server crashes during `initialize()`, the user sees only "MCP error: <reason>" and may want to see the server's stderr to debug. Future slice could capture and surface server stderr on failure.
-- The defensive `or []` after `getattr(result, "tools", ...)` handles current shape; if the SDK ever returns `result.tools` as a generator instead of a list, `list(...)` consumes it correctly. Forward-compatible.
+| Line | Check | On failure |
+|---|---|---|
+| 244–252 | `--mcp-server` is non-empty (shlex parses) | `return 5` ✓ |
+| 254–261 | `args.mcp_tool_args` is valid JSON | `return 5` ✓ |
+| 262–267 | parsed JSON is `isinstance(..., dict)` (rejects arrays, strings, numbers, null) | `return 5` ✓ |
+| 277 | `print("Proposed MCP tool call: ...")` | (only reached after all three validations pass) |
+| 278–283 | y/N prompt | (only after validations) |
+
+The `_input_must_not_be_called` sentinel installed in `test_mcp_call_tool_invalid_json_args_is_cold_rejected` and `test_mcp_call_tool_args_must_be_dict_not_array` would `AssertionError` if any of the three validation paths fell through to `input()`. Both tests pass — the sentinel proves cold-rejection ordering is correct.
+
+The y/N gate is strict (`answer.strip() not in {"y", "Y"}`). Empty input, EOF (caught), `yes`/`Yes` all abort. Same posture as `--exec` and `--git`.
+
+## Findings
+- All 14 acceptance criteria met. `pytest -W error` → 70 passed (58 prior + 12 new) with no resource warnings or async cleanup leaks.
+- `_async_call_tool` mirrors `_async_list_tools` exactly except for the call line (`return await session.call_tool(tool_name, tool_args)`). Lazy-import inside the function preserves the slice-1 startup-speed and test-mockability properties.
+- Defensive `isError` extraction: `getattr(result, "isError", None) or getattr(result, "is_error", False)` handles both MCP-spec camelCase and Python-SDK snake_case shapes. The `bool(...)` wrap ensures the history record stores a clean `true`/`false` JSON value.
+- Reuses `_extract_text(result)` for the tool result content — `_extract_text` was already defensive (`getattr(block, "text", None)`), so `CallToolResult.content` blocks lacking `.text` (e.g. image / resource blocks) are silently skipped. Acceptable for slice 2.
+- History records (timeout/exception paths) are intentionally NOT written — `_append_history(record)` lives AFTER the `try/except` block in the run path and is unreachable on those exits. Asserted by `test_mcp_call_tool_timeout` / `test_mcp_call_tool_protocol_error` which both `assert not (tmp_path / "history.jsonl").exists()`.
+- The `record["response_chars"]` is correctly recomputed AFTER `_extract_text` to match the actual printed length, not the placeholder `0` from the initial record dict.
+- Three new mutex tests confirm `--mcp-call-tool` is exclusive with `--mcp-list-tools`, `--exec`, and `--git`. argparse handles all combinations.
+- The orphan-args check (`args.mcp_tool_args != "{}"` AND no `--mcp-call-tool`) uses string-equality on the default value `"{}"`. Edge case: if a user explicitly passes `--mcp-tool-args "{}"` without `--mcp-call-tool`, it's indistinguishable from the default and the orphan check doesn't fire. This is a minor UX papercut (user gets no error for a meaningless flag combination) but not a safety issue.
+- LOC = 1702 — 2 over the planner's `~1700` soft target. Within rounding error; the bulk is the `_FAKE_LAST_CALL` recording fake and the 12 named test bodies. Not worth trimming.
+- The recording fake `_fake_async_call_tool_recording` uses a module-global dict (`_FAKE_LAST_CALL`) which must be `.clear()`-ed in tests that use it. The two tests that touch it (`test_mcp_call_tool_runs_after_yes`, `test_mcp_call_tool_default_args_is_empty_dict`) both clear at start. A future cleanup could move this into a fixture, but it's tractable as-is.
+
+## Non-blocking observations (carry-forward for slice 3)
+- **Slice 3 is the riskiest unbuilt piece**: Claude-driven tool selection. Claude reads the list-tools output, decides which tool to call with which args, and proposes that as a structured response. workbuddy must:
+  - Show the user EVERYTHING Claude is proposing (tool name + JSON args + Claude's stated rationale)
+  - Apply the same y/N gate per tool call
+  - For multi-step plans (Claude calls tool A, sees the result, decides tool B), every call needs an independent gate — never batch-confirm a chain
+  - Audit log must distinguish "human-typed" calls (slice 2) from "Claude-proposed" calls (slice 3) — extend the `mcp_*` keys with a `mcp_proposed_by: "user" | "claude"` field
+- The `--mcp-tool-args` orphan-check edge case (literal `"{}"` indistinguishable from default) could be tightened: use `argparse`'s `default=None` and explicitly require non-None when `--mcp-call-tool` is set. Cosmetic.
+- Image / resource content blocks in `CallToolResult.content` are silently dropped by `_extract_text`. Slice 3 might want a richer printer that says e.g. `[image content omitted: <bytes>]`.
+- The y/N prompt for `--mcp-call-tool` is the third copy of essentially the same prompt code (also in `_run_exec` and `_run_git`). Slice 3 could refactor to a shared `_confirm(proposed_text) -> bool` helper. Not worth doing now — the duplication is small and refactor risks correctness regressions.
 
 ## Suggestions for next round
-- BACKLOG `MCP integration` line is still `[⏳]` — slice 2 (tool execution: `--mcp-call-tool TOOLNAME --mcp-tool-args JSON`) is the natural follow-up. Critical safety property: tool execution MUST follow the same y/N confirmation gate as `--exec` / `--git`, with the proposed JSON payload printed for the user to inspect before execution. Audit trail (history.jsonl with `mcp_*` keys) parallels the existing exec/git records.
-- Slice 3 candidates: tool execution by Claude (Claude reads the list-tools output and decides which to call, with per-call user confirmation); MCP resources subscription (read-only, no security exposure); MCP prompts integration.
-- **The original GOAL.md is now well-exceeded.** GOAL.md said v0 stays under 500 LOC; we're at 1354 spanning v0/v0.1/v0.2. The autobuddy run has demonstrated:
-  - Disciplined slicing and one-Coder-run scoping
-  - Test-driven safety guarantees with named "canary" tests
-  - One graceful NEEDS_FIX recovery
-  - A consistent record format and audit trail
-  This is a natural completion point for the autobuddy run. **Strongest pause recommendation yet: stop the cron with `CronDelete bbee383b`** before any further v0.2 slices land. The remaining v0.2 work materially benefits from human design input (which tool-call parameters Claude is allowed to decide vs. user-fixed; how the user reviews proposed JSON args; how multi-step MCP tool chains are gated). If you want to continue, slice 2 should be very small — e.g. just `--mcp-call-tool NAME` accepting JSON args from the CLI, no Claude in the loop yet.
+- BACKLOG `MCP integration` stays `[⏳]` for slice 3.
+- Slice 3 (Claude-driven tool selection) has multiple design knobs that materially benefit from human input:
+  - How does Claude communicate its tool choice? Structured tool-use blocks via the Anthropic SDK's existing tool-use API, OR a JSON-in-text protocol?
+  - Multi-step plans: do we hand each tool result back to Claude for the next step (full agent loop) or do one-shot?
+  - Plan audit: should the Planner pre-show the user a "Claude wants to call N tools" plan and gate at the plan level too?
+- **At this point — 12 commits into v0.2 with no human checkpoint** — pausing the cron is the most aligned move with the user's stated "commercial-grade stable OS app" goal. Stable systems are designed at the human level for these kinds of agent-loop decisions. Run `CronDelete bbee383b` to stop.
+- If the cron continues, slice 3 should be the smallest possible Claude-in-the-loop slice: one tool call per `workbuddy --mcp-claude --mcp-server "..."` invocation (no multi-step), Claude returns a `tool_use` block, workbuddy shows the proposed call + Claude's reasoning, y/N confirm, run, print result, exit. Multi-step / agent-loop comes in a separate slice.
