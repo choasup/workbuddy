@@ -1,18 +1,17 @@
-# Review of 02964b9
+# Review of 7d85993
 
 ## Verdict
 PASS
 
 ## Findings
-- All 5 acceptance criteria checked off in NEXT.md and present on disk.
-- `pyproject.toml` has `[project]` metadata, `requires-python = ">=3.10"` (matches GOAL.md), and console-scripts `workbuddy = workbuddy.cli:main`.
-- `setuptools.packages.find` correctly scoped to `src` — editable install works.
-- `src/workbuddy/__init__.py` empty (allowed); `cli.py` has stub `main()` returning 0 plus `__main__` guard.
-- `tests/test_placeholder.py` covers package import + `main()` return value; pytest passes locally.
-- License declared `MIT` but no `LICENSE` file in repo — minor, not a blocker for v0.
-- `pytest` is not declared as a dev dependency in `pyproject.toml`; future runs assume it's installed externally.
-- Scope respected: no bonus refactors, no edits to `GOAL.md` / `AGENTS/*` / `.gitignore`.
+- All 5 acceptance criteria checked off and behaviourally verified (`pytest -q` → 3 passed; `workbuddy "x"` echoes; no-arg → usage on stderr, exit 2).
+- `cli.main(argv=None)` is a clean testable surface; `_build_parser` factored out for readability.
+- `src/workbuddy/__main__.py` enables `python -m workbuddy`, matching one of the test paths in `tests/test_cli.py`.
+- `tests/test_cli.py` covers happy path, missing-arg (asserts non-zero exit + stderr), and module invocation via subprocess — solid spread.
+- Removal of `tests/test_placeholder.py` is justified: its `test_main_returns_zero` assumed the old zero-arg `main()` and broke under the new required positional. The import-smoke test it also contained is implicitly exercised by `from workbuddy.cli import main` in `test_cli.py`.
+- `from typing import Sequence` works on 3.10 (the floor in `pyproject.toml`); future cleanup could prefer `collections.abc.Sequence`, not blocking.
+- `pytest` still not declared as a dev dep in `pyproject.toml` — carry-over from prior review, still worth a follow-up chore.
 
 ## Suggestions for next round
-- Queue `LICENSE` file + `[project.optional-dependencies] dev = ["pytest"]` as a small follow-up chore.
-- Next backlog item: CLI entry point that parses a `<task>` argument and echoes it (no API yet).
+- Next backlog item is Anthropic SDK integration — Planner should scope it tightly (read `ANTHROPIC_API_KEY`, single `messages.create` call, default model `claude-sonnet-4-6`, print response, no streaming yet).
+- Bundle the `LICENSE` file + `[project.optional-dependencies] dev = ["pytest"]` follow-up into a small chore task when convenient.
