@@ -6,7 +6,7 @@
 - [x] Anthropic SDK integration: send task to Claude API, print response
 - [x] Append responses to `~/.workbuddy/log.md` with UTC timestamps
 - [x] Add `--model` flag (default `claude-sonnet-4-6`)
-- [ ] Error handling: missing `ANTHROPIC_API_KEY`, network errors
+- [⏳] Error handling: missing `ANTHROPIC_API_KEY`, network errors
 - [ ] README usage section with install + example
 - [ ] Unit tests for CLI parsing and log writer
 
