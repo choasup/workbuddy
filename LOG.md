@@ -30,3 +30,4 @@
 [2026-05-08T12:28:16Z] CODER → LICENSE (MIT) added; pyproject.toml [project.optional-dependencies] dev = ["pytest>=7"]; README Status bumped to "v0 — feature complete"; pip install -e ".[dev]" verified; pytest 16 still passing
 [2026-05-08T12:29:11Z] REVIEWER → 49429dd PASS — v0 polish complete; v0 + polish fully shipped
 [2026-05-08T12:30:35Z] PLANNER → Persist a preferred default model in `~/.workbuddy/config.json` (v0.1 slice 1 of 2: config.json; history.jsonl deferred)
+[2026-05-08T12:32:46Z] CODER → _config_path / _load_config_default_model added (json stdlib, fallback for missing file is silent, malformed/wrong-type warns); _build_parser uses the resolved default for both default= and help=; +3 tests; README usage gets a one-line note; pytest 19 passed

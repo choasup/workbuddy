@@ -1,3 +1,4 @@
+import json
 import types
 
 import anthropic
@@ -94,6 +95,45 @@ def test_main_model_flag_overrides_default(monkeypatch, capsys):
     sent = _StubClient.last_messages.last_kwargs
     assert sent is not None
     assert sent["model"] == "claude-opus-4-7"
+
+
+def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"default_model": "claude-opus-4-7"}), encoding="utf-8"
+    )
+
+    rc = main(["task"])
+
+    assert rc == 0
+    assert _StubClient.last_messages.last_kwargs["model"] == "claude-opus-4-7"
+
+
+def test_main_explicit_model_flag_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"default_model": "claude-opus-4-7"}), encoding="utf-8"
+    )
+
+    rc = main(["--model", "claude-haiku-4-5", "task"])
+
+    assert rc == 0
+    assert _StubClient.last_messages.last_kwargs["model"] == "claude-haiku-4-5"
+
+
+def test_main_malformed_config_falls_back_and_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+    (tmp_path / "config.json").write_text("not json {", encoding="utf-8")
+
+    rc = main(["task"])
+
+    assert rc == 0
+    assert _StubClient.last_messages.last_kwargs["model"] == "claude-sonnet-4-6"
+    captured = capsys.readouterr()
+    assert "warning" in captured.err
 
 
 def test_main_api_error_exits_nonzero_and_does_not_log(tmp_path, monkeypatch, capsys):

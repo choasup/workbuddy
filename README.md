@@ -27,6 +27,8 @@ Override the model with `--model` (default: `claude-sonnet-4-6`):
 workbuddy --model claude-opus-4-7 "write a haiku about caching"
 ```
 
+To persist a preferred default without typing `--model` every time, create `~/.workbuddy/config.json` with shape `{"default_model": "claude-opus-4-7"}`. An explicit `--model` flag still wins.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 ## Architecture (control plane)

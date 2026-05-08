@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -13,7 +14,37 @@ MAX_LOGGED_RESPONSE_CHARS = 4000
 REQUEST_TIMEOUT_SECONDS = 60.0
 
 
+def _config_path() -> Path:
+    return _log_path().parent / "config.json"
+
+
+def _load_config_default_model() -> str:
+    path = _config_path()
+    if not path.exists():
+        return DEFAULT_MODEL
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"warning: ignoring malformed config.json: {exc}", file=sys.stderr)
+        return DEFAULT_MODEL
+    if not isinstance(data, dict):
+        print(
+            "warning: ignoring malformed config.json: top-level must be an object",
+            file=sys.stderr,
+        )
+        return DEFAULT_MODEL
+    value = data.get("default_model")
+    if isinstance(value, str) and value:
+        return value
+    print(
+        "warning: ignoring malformed config.json: default_model must be a non-empty string",
+        file=sys.stderr,
+    )
+    return DEFAULT_MODEL
+
+
 def _build_parser() -> argparse.ArgumentParser:
+    effective_default = _load_config_default_model()
     parser = argparse.ArgumentParser(
         prog="workbuddy",
         description="Minimal Python CLI agent assistant backed by the Claude API.",
@@ -21,8 +52,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("task", help="Natural-language task for the agent to run.")
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"Claude model id (default: {DEFAULT_MODEL})",
+        default=effective_default,
+        help=f"Claude model id (default: {effective_default})",
     )
     return parser
 
