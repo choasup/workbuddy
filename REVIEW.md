@@ -1,48 +1,31 @@
-# Review of ca1cacf
+# Review of 23aa195
 
 ## Verdict
 PASS
 
-## Safety property check (the most layered yet)
-
-The `--mcp-agent` slice was scoped with six explicit safety properties. I verified each by reading the source and confirming each test exercises the relevant path:
-
-| Property | Source | Test |
-|---|---|---|
-| **Hard cap enforced at parse time** — user CANNOT pass `--mcp-agent-max-turns=99` | line 994: `if args.mcp_agent and not (1 <= args.mcp_agent_max_turns <= MAX_AGENT_TURNS_HARD_CAP): return 5` | `test_mcp_agent_max_turns_above_hard_cap_rejected`, `test_mcp_agent_max_turns_zero_rejected` |
-| **Loop bounded** | line 330: `for turn_index in range(max_turns)` — validated `max_turns ∈ [1, 5]` | implicit; no infinite-loop test possible without timeouts |
-| **Per-turn y/N gate** — never batch-confirm | line 427: `input()` inside the for-loop, called once per turn | `test_mcp_agent_two_turns_then_final` (input "y" twice), `test_mcp_agent_user_aborts_mid_loop` (input "n" stops the loop) |
-| **Per-turn cold-rejection ordering** — multi-tool / hallucination / non-dict-input all return 5 BEFORE that turn's prompt at line 425 | lines 376, 393, 407 (returns precede line 425) | `test_mcp_agent_multi_tool_per_turn_cold_rejected`, `test_mcp_agent_hallucinated_tool_cold_rejected` (both with `_input_must_not_be_called` sentinel) |
-| **`messages` list grows ONLY on run-success** — every cold-rejection / abort / error path returns before line 475 | inspected: lines 374, 387, 405, 419, 440 all `return` before line 475 | `test_mcp_agent_user_aborts_mid_loop` asserts `len(scripted.create_calls) == 1` (the abort prevented a second create() call, which would only happen if the messages list had been extended) |
-| **Distinct exit code for max-turns** — separate from other failure modes | line 504: `return 7` | `test_mcp_agent_max_turns_reached` |
-
-All 11 new tests pass; `pytest -W error` confirms no async leaks (the loop's `asyncio.run` per turn correctly cleans up coroutines).
-
 ## Findings
-- All 12 acceptance criteria met. `pytest -q -W error` → 91 passed (80 prior + 11 new) clean.
-- Module constants `DEFAULT_AGENT_TURNS = 3` and `MAX_AGENT_TURNS_HARD_CAP = 5` are named and used in:
-  - argparse `default=` and `help=` (single source of truth in help text via f-string)
-  - validation check (`1 <= ... <= MAX_AGENT_TURNS_HARD_CAP`)
-  - error message (so user sees the actual cap if they exceed it)
-- The argparse mutex group now includes 6 modes (`--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`, `--mcp-agent`); `test_mcp_agent_mutually_exclusive_with_other_modes` parametrically verifies all 5 pairings via SystemExit.
-- The orphan-`--mcp-agent-max-turns` check is correct: comparison `args.mcp_agent_max_turns != DEFAULT_AGENT_TURNS` distinguishes user-set from default. Subtle edge case: if the user passes `--mcp-agent-max-turns 3` (matching the default), the orphan check doesn't fire — but this only matters when `--mcp-agent` is also unset, in which case the user's explicit `3` is a no-op anyway. Acceptable.
-- `messages.append({"role": "assistant", "content": list(content)})` makes a list-copy of the SDK's response content. Shallow copy of immutable response blocks — sufficient.
-- `tool_result` blocks correctly reference `getattr(tu, "id", "unknown-id")` so the next API call in the loop can pair the result with the right tool_use. The `"unknown-id"` fallback is a defense if the SDK shape changes; the API might reject it but that's better than a crashing AttributeError.
-- The `joined_text` per turn is recorded in history.jsonl as `claude_reasoning` — the user can audit Claude's intent turn-by-turn. Combined with `turn_index`, this gives a complete reconstruction of the agent's decision tree.
-- LOC = 2759 — well under the planner's `~2900` target. The implementation is clean and the tests are explicit/named (no over-parametrize collapsing).
-- The `_ScriptedMessages` test helper is reusable for future multi-turn tests (e.g. v0.3 slice 2 parallel tool calls would need the same per-turn response control).
-
-## Non-blocking observations
-- The `is_error=True` path inside the loop currently lets Claude continue (the tool_result is appended with `is_error: true`, and Claude can decide to retry / give up). This is correct — Claude should be able to recover from a tool error. However, there's no upper bound on consecutive errors; a misbehaving tool could burn through all 5 turns producing errors. Slice 2 candidate: track consecutive `is_error` count and abort early if it exceeds a threshold (e.g. 2 consecutive errors → exit 8).
-- The agent loop calls `_async_call_tool` separately each turn, opening a fresh `stdio_client` connection. For high-frequency loops this is inefficient (each turn pays the spawn-server cost). Slice 2 candidate: keep one server session open across turns. Not blocking — slice 1's per-turn-fresh-session is simple and correct.
-- The user can't see which tool Claude is *about* to propose before the first turn's API call returns. That's inherent to the loop design — no way to know in advance. Mitigated by `Turn 1/N` framing so the user knows they're about to be asked.
-- No streaming. Each turn's response is fully buffered before the prompt. For large responses this could be slow. Streaming + interrupt is out of scope for slice 1.
+- All 9 acceptance criteria met. `pytest -W error` → 94 passed (91 prior + 3 new) clean — no resource warnings.
+- 16-LOC diff to `_run_mcp_agent` is correctly placed and minimal:
+  - Counter init `consecutive_errors = 0` BEFORE the for-loop (line 330)
+  - Increment-or-reset happens AFTER the run-success history record append, BEFORE the `messages.append` calls
+  - Cap check `>=` (not `>`) so reaching the cap value `2` triggers, not a value above it
+  - Abort path writes its own `consecutive-error-abort` record (separate from the failed-run record from the same turn) — history.jsonl now reads forensically: turn N run with `mcp_is_error=True`, then turn N abort with `consecutive_errors=2`
+  - Returns 8 before `messages.append`, so the conversation doesn't grow into a never-reached iteration
+- The 3 new tests cover the relevant axis cleanly:
+  - `test_mcp_agent_one_error_then_success_continues` — proves a single error doesn't trip the cap; counter resets on success.
+  - `test_mcp_agent_two_consecutive_errors_aborts` — proves the cap fires; the assertion `len(scripted.create_calls) == 2` confirms the third Anthropic response is NEVER requested (the abort short-circuited).
+  - `test_mcp_agent_error_then_success_then_error_continues` — proves NON-consecutive errors don't trip the cap (counter resets to 0 between).
+- The `_make_async_call_tool_scripted([(text, is_error), ...])` test helper is reusable for any future tests that need to control `is_error` across turns. Cleaner than the prior single-call fakes.
+- Subtle interaction with `max_turns` is correct:
+  - If `max_turns=1` (1 turn allowed), a single error can never trip a *consecutive* cap that requires 2 — the loop just hits max-turns. Semantically right (the user limited the budget).
+  - If errors persist past the cap, the abort takes precedence over max-turns-reached, with a more informative exit code (8 vs 7).
+- LOC = 2915 — 15 over the planner's `~2900` soft target. Bulk is the new test-helper + 3 named tests; not worth trimming.
+- Audit trail: a future analyst reading `history.jsonl` can grep `mcp_decision="consecutive-error-abort"` to find aborted runs, and the `consecutive_errors` field tells them exactly how many failures fired the cap. Forward-compat for slice 3 + analytics.
 
 ## Suggestions for next round
-- BACKLOG v0.3 line is at `[⏳]` after this round. The annotation says slice 1 (single-tool-per-turn, no parallel calls, no self-reflection). The remaining v0.3 sub-features:
-  - **Parallel tool calls per turn** — Claude responds with multiple tool_use blocks; workbuddy gates ALL of them in one prompt or per-call. Critical UX question: do you confirm 3 tools in one prompt, or 3 separate prompts? The latter is safer; the former is faster.
-  - **Self-reflection / introspection** — let Claude inspect its own history.jsonl entries to learn from prior runs.
-  - **Consecutive-error abort** (noted above) — bounded retry on tool errors.
-- All of these have meaningful design choices that benefit from human input. The autobuddy run has now covered three independently-shipped Claude-loop variants (`--mcp-claude`, `--mcp-agent`, plus the prior `--exec` and `--git`); slicing further would push into novel territory faster than the cron's 1-min cadence really suits.
-- **The honest stopping point is here.** After 80+ commits, every original BACKLOG line is shipped (v0/v0.0-polish/v0.1/v0.2 all `[x]`), v0.3 has its first slice landed, and the test suite is the highest signal I've ever seen on a single-session run. Run `CronDelete bbee383b`. The remaining v0.3 sub-features are the kind of design decisions that produce different products depending on which way you go — exactly the spot where a human PR review pays off most.
-- If the cron continues, the next round should NOT be parallel-tool-calls (too many UX decisions). Better candidates: a small consecutive-error abort (clean small slice), OR a `--mcp-agent --dry-run` that prints what Claude WOULD do without executing (defensive, useful for debugging an agent's plan before running it).
+- BACKLOG v0.3 stays `[⏳]` — slice 3 candidates remain (parallel tool calls, self-reflection, `--dry-run` mode for the agent loop).
+- Strongest-signal candidates if the cron continues:
+  - **`--mcp-agent --dry-run`** — show what Claude WOULD do at each turn but don't actually call `_async_call_tool`; feed Claude a synthetic `(dry-run: tool not actually invoked)` tool_result so it can explore a plan without side effects. Useful debugging tool. Doesn't change any execution semantics.
+  - **Bounded self-reflection** — at the end of a `--mcp-agent` run, call Claude once more with the full transcript and ask "did this complete the task?" — a single yes/no recap printed for the user. Bounds: one extra non-tool call, doesn't loop.
+  - **NOT recommended next**: parallel tool calls. The UX decision (one prompt per call vs. one prompt for N calls) is the kind of choice that produces different products; a human should decide.
+- Same standing recommendation: this is still a good place to pause. Each subsequent slice has been smaller and more incremental, which is good — but at some point the agent itself needs review beyond what canary tests can catch. Run `CronDelete bbee383b` when ready.
