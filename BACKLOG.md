@@ -1,7 +1,7 @@
 # Backlog
 
 ## v0 (MVP)
-- [⏳] Project skeleton: `pyproject.toml`, `src/workbuddy/__init__.py`, `src/workbuddy/cli.py`, `tests/`
+- [x] Project skeleton: `pyproject.toml`, `src/workbuddy/__init__.py`, `src/workbuddy/cli.py`, `tests/`
 - [ ] CLI entry point `workbuddy "<task>"`: parse args, echo task back (no API yet)
 - [ ] Anthropic SDK integration: send task to Claude API, print response
 - [ ] Append responses to `~/.workbuddy/log.md` with UTC timestamps
