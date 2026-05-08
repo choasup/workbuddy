@@ -7,12 +7,12 @@ Add `--mcp-claude`: Claude reads the MCP server's tool list, proposes ONE tool c
 GOAL.md v0.2 — "MCP integration", final slice. Single-shot Claude-in-the-loop: list tools → ask Claude to pick at most one for the user's task → show proposed call + Claude's reasoning → strict y/N gate → execute via `_async_call_tool`. **NO agent loop / NO multi-step in this slice** — if Claude proposes more than one tool call we error out, telling the user a future slice will add multi-step. The tool name MUST be one Claude actually saw in the list (rejects hallucinations cold)
 
 ## Acceptance
-- [ ] `src/workbuddy/cli.py` adds `--mcp-claude` to the existing `mode_group` (mutex with `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`). Help: `Ask Claude to pick ONE MCP tool for the task and execute it after y/N confirmation. Reads tools from --mcp-server. Single-shot (no agent loop)`
-- [ ] Validation in `main()` BEFORE the API key check:
+- [x] `src/workbuddy/cli.py` adds `--mcp-claude` to the existing `mode_group` (mutex with `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`). Help: `Ask Claude to pick ONE MCP tool for the task and execute it after y/N confirmation. Reads tools from --mcp-server. Single-shot (no agent loop)`
+- [x] Validation in `main()` BEFORE the API key check:
   - If `args.mcp_claude and args.mcp_server is None` → exit 5 with stderr `error: --mcp-claude requires --mcp-server`
   - Dispatch: `if args.mcp_claude: return _run_mcp_claude(args)`
   - The API key check still runs implicitly (slice 3 DOES need Claude). Move the dispatch AFTER the api_key check OR re-check inside `_run_mcp_claude`. Pick one — recommend re-check inside to keep `main` linear
-- [ ] Add `def _run_mcp_claude(args) -> int`:
+- [x] Add `def _run_mcp_claude(args) -> int`:
   1. Validate `args.mcp_server` via shlex.split (same pattern as `_run_mcp_call_tool`); empty → exit 5
   2. Validate `ANTHROPIC_API_KEY` is set; missing → exit 1 (matches existing missing-key contract)
   3. List server tools via `asyncio.run(asyncio.wait_for(_async_list_tools(server_argv), timeout=MCP_TIMEOUT_SECONDS))`. Wrap in `try/except` → on `(asyncio.TimeoutError, TimeoutError)` exit 6, on other `Exception` exit 5 (`MCP error: <Class>: <msg>`)
@@ -34,14 +34,14 @@ GOAL.md v0.2 — "MCP integration", final slice. Single-shot Claude-in-the-loop:
   17. Abort: stderr `aborted`, history with `mcp_decision="aborted"`, return 0
   18. Run: `_async_call_tool(...)` wrapped in `asyncio.run(asyncio.wait_for(..., timeout=MCP_TIMEOUT_SECONDS))`. TimeoutError → exit 6, NO history. Other Exception → exit 5 `MCP error:`, NO history
   19. Extract `is_error`, print result text via `_extract_text`, history with `mcp_decision="run", mcp_is_error=is_error, response_chars=len(text)`. Return `5 if is_error else 0`
-- [ ] **Critical safety properties**:
+- [x] **Critical safety properties**:
   1. Hallucinated tool names are cold-rejected (no prompt, no execution)
   2. Multi-tool proposals are cold-rejected (single-shot only)
   3. Non-dict tool args are cold-rejected
   4. Strict y/N gate (same as slice 2)
   5. Hallucination/multi-tool rejections write audit history with `mcp_rejection_reason` for forensics
-- [ ] Slice 2's history records gain a `mcp_proposed_by: "user"` field (so future analytics can distinguish human-typed vs Claude-proposed calls). One-line change: add the key to the record dict in `_run_mcp_call_tool`. Existing slice-2 tests must be updated to assert `row["mcp_proposed_by"] == "user"`
-- [ ] `tests/test_cli.py` adds these tests. Define a `_make_anthropic_with_tool_use(...)` helper that returns a `_StubClient`-shaped class whose `messages.create()` returns content blocks with `type="text"` and/or `type="tool_use"` per parameters:
+- [x] Slice 2's history records gain a `mcp_proposed_by: "user"` field (so future analytics can distinguish human-typed vs Claude-proposed calls). One-line change: add the key to the record dict in `_run_mcp_call_tool`. Existing slice-2 tests must be updated to assert `row["mcp_proposed_by"] == "user"`
+- [x] `tests/test_cli.py` adds these tests. Define a `_make_anthropic_with_tool_use(...)` helper that returns a `_StubClient`-shaped class whose `messages.create()` returns content blocks with `type="text"` and/or `type="tool_use"` per parameters:
   - `test_mcp_claude_runs_tool_after_yes` — fake list_tools returns `[SimpleNamespace(name="echo", description="echo", inputSchema={})]`. Anthropic stub returns one tool_use block (`name="echo", input={"x": 1}`) plus a text block ("I'll echo that"). Fake call_tool returns content with text "echoed: 1". Input "y". Assert main returns 0, stdout contains both "Claude: I'll echo that" and "echoed: 1", history row has `mcp_decision="run"`, `mcp_proposed_by="claude"`, `claude_reasoning` containing "echo"
   - `test_mcp_claude_no_tool_use_prints_text_only` — Anthropic stub returns text only, no tool_use. Fake call_tool MUST NOT be called (use the must-not-be-called sentinel). Assert main returns 0, stdout contains the text, history has `mcp_decision="text-only"`. Also assert log.md has the entry
   - `test_mcp_claude_multi_tool_use_is_cold_rejected` — Anthropic stub returns 2 tool_use blocks (configure `multi_count=2`). Input must-not-be-called sentinel. Assert main returns 5, stderr contains "Claude proposed 2 tool calls", history has `mcp_decision="rejected"` and `mcp_rejection_reason="multi-tool"`
@@ -52,12 +52,12 @@ GOAL.md v0.2 — "MCP integration", final slice. Single-shot Claude-in-the-loop:
   - `test_mcp_claude_mutually_exclusive_with_other_modes` — verify SystemExit on `--mcp-claude` with each of `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`
   - `test_mcp_claude_tool_isError_returns_5` — happy path setup but call_tool returns isError=True with text "tool failed". Input "y". Returns 5, stdout has "tool failed", history has `mcp_is_error=True`
   - `test_mcp_call_tool_history_now_has_proposed_by_user` — happy path of slice 2 (`--mcp-call-tool`). Assert history row has `mcp_proposed_by == "user"` (forward-compat for slice 3 audit queries)
-- [ ] All 70 existing tests must continue to pass. The slice-2 tests asserting history shape will need ONE-LINE updates to also assert `mcp_proposed_by == "user"` if they read the row's `mcp_decision` — audit them and update only the necessary tests
-- [ ] `python -m pytest -W error` passes (no resource warnings)
-- [ ] `README.md` "Usage" section gains a `--mcp-claude` paragraph after the `--mcp-call-tool` paragraph: example `workbuddy --mcp-claude --mcp-server "python -m my_server" "echo hi"`. Explain that Claude reads the tools, proposes ONE call (single-shot, no multi-step), workbuddy shows reasoning + proposed call, y/N confirms. Note hallucination defense (tool name must match listed tools), and that multi-step / agent loop is a future slice
-- [ ] Update BACKLOG: change `[⏳] MCP integration *(slice 1+2 ...)*` to `[x] MCP integration *(--mcp-list-tools, --mcp-call-tool, --mcp-claude shipped; agent loop / multi-step deferred to v0.3)*`. With this round merging, the v0.2 BACKLOG line is finally `[x]` and ALL declared scope tiers (v0/v0.1/v0.2) ship complete
-- [ ] Add a new BACKLOG section `## v0.3 (post-MCP)` with one entry: `[ ] Multi-step agent loop: Claude calls tool, sees result, decides next tool — with per-call y/N gates`. This codifies that the autobuddy run did NOT ship full agent loops; humans should design that
-- [ ] Total project Python LOC stays under ~2200
+- [x] All 70 existing tests must continue to pass. The slice-2 tests asserting history shape will need ONE-LINE updates to also assert `mcp_proposed_by == "user"` if they read the row's `mcp_decision` — audit them and update only the necessary tests
+- [x] `python -m pytest -W error` passes (no resource warnings)
+- [x] `README.md` "Usage" section gains a `--mcp-claude` paragraph after the `--mcp-call-tool` paragraph: example `workbuddy --mcp-claude --mcp-server "python -m my_server" "echo hi"`. Explain that Claude reads the tools, proposes ONE call (single-shot, no multi-step), workbuddy shows reasoning + proposed call, y/N confirms. Note hallucination defense (tool name must match listed tools), and that multi-step / agent loop is a future slice
+- [x] Update BACKLOG: change `[⏳] MCP integration *(slice 1+2 ...)*` to `[x] MCP integration *(--mcp-list-tools, --mcp-call-tool, --mcp-claude shipped; agent loop / multi-step deferred to v0.3)*`. With this round merging, the v0.2 BACKLOG line is finally `[x]` and ALL declared scope tiers (v0/v0.1/v0.2) ship complete
+- [x] Add a new BACKLOG section `## v0.3 (post-MCP)` with one entry: `[ ] Multi-step agent loop: Claude calls tool, sees result, decides next tool — with per-call y/N gates`. This codifies that the autobuddy run did NOT ship full agent loops; humans should design that
+- [x] Total project Python LOC stays under ~2200
 
 ## Files likely involved
 - src/workbuddy/cli.py

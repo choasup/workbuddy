@@ -59,7 +59,15 @@ Pass `--mcp-call-tool NAME --mcp-tool-args JSON` to invoke a specific tool with 
 workbuddy --mcp-call-tool echo --mcp-tool-args '{"text": "hi"}' --mcp-server "python -m my_server" .
 ```
 
-Arguments must be a JSON object (top-level `{...}`). Bad JSON or non-object args are rejected before any confirmation prompt. The proposed call is shown as `Proposed MCP tool call: name(json-args)`, then a `y/N` confirmation prompt with default no — empty input or EOF aborts. On success, the tool's text content is printed and exit code is 0; if the tool reports `isError: true`, the error text is still printed and exit code is 5; timeouts exit 6. NO Claude is in the loop in this slice — Claude-driven tool selection is a future slice. `--mcp-call-tool` is mutually exclusive with `--exec`, `--git`, and `--mcp-list-tools`.
+Arguments must be a JSON object (top-level `{...}`). Bad JSON or non-object args are rejected before any confirmation prompt. The proposed call is shown as `Proposed MCP tool call: name(json-args)`, then a `y/N` confirmation prompt with default no — empty input or EOF aborts. On success, the tool's text content is printed and exit code is 0; if the tool reports `isError: true`, the error text is still printed and exit code is 5; timeouts exit 6. `--mcp-call-tool` is mutually exclusive with `--exec`, `--git`, `--mcp-list-tools`, and `--mcp-claude`.
+
+Pass `--mcp-claude` to ask Claude to pick ONE MCP tool for your task and execute it after y/N confirmation:
+
+```bash
+workbuddy --mcp-claude --mcp-server "python -m my_server" "echo hi to the world"
+```
+
+`--mcp-claude` is single-shot only — Claude picks at most one tool. Multi-step / agent-loop is intentionally not in this slice (deferred to v0.3 with separate human design). Defenses: (1) Claude's proposed tool name MUST be one of the actual tools the server advertised — hallucinated names are cold-rejected before the prompt; (2) if Claude proposes more than one tool call, the run is cold-rejected; (3) non-dict tool args are cold-rejected; (4) the `y/N` gate is the same strict default-no contract as other modes. The user sees Claude's reasoning text prefixed with `Claude:` and the proposed call before confirming. `--mcp-claude` is mutually exclusive with `--exec`, `--git`, `--mcp-list-tools`, and `--mcp-call-tool`.
 
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 

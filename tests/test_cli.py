@@ -519,6 +519,295 @@ def test_mcp_call_tool_mutually_exclusive_with_exec_and_git(capsys):
         main(["--mcp-call-tool", "x", "--git", "task"])
 
 
+def _make_anthropic_with_blocks(blocks):
+    class _StubMessages:
+        def __init__(self):
+            self.last_kwargs: dict | None = None
+
+        def create(self, **kwargs):
+            self.last_kwargs = kwargs
+            return types.SimpleNamespace(content=blocks)
+
+    class _StubClientWithToolUse:
+        last_messages = None
+
+        def __init__(self, **kwargs):
+            self.messages = _StubMessages()
+            type(self).last_messages = self.messages
+
+    return _StubClientWithToolUse
+
+
+def _text_block(text: str):
+    return types.SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(name: str, input_dict: dict):
+    return types.SimpleNamespace(type="tool_use", name=name, input=input_dict)
+
+
+async def _fake_list_returning(tools_list):
+    async def _fake(server_argv):
+        return tools_list
+
+    return _fake
+
+
+_LAST_CLAUDE_CALL_TOOL: dict = {}
+
+
+async def _fake_async_call_tool_for_claude(server_argv, tool_name, tool_args):
+    _LAST_CLAUDE_CALL_TOOL["server_argv"] = server_argv
+    _LAST_CLAUDE_CALL_TOOL["tool_name"] = tool_name
+    _LAST_CLAUDE_CALL_TOOL["tool_args"] = tool_args
+    return types.SimpleNamespace(
+        content=[types.SimpleNamespace(text="echoed: 1")], isError=False
+    )
+
+
+def test_mcp_claude_runs_tool_after_yes(tmp_path, monkeypatch, capsys):
+    _LAST_CLAUDE_CALL_TOOL.clear()
+    server_tools = [
+        types.SimpleNamespace(name="echo", description="echo input", inputSchema={})
+    ]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks(
+            [_text_block("I'll echo that"), _tool_use_block("echo", {"x": 1})]
+        ),
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_async_call_tool_for_claude)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "echo hi"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Claude: I'll echo that" in captured.out
+    assert "echoed: 1" in captured.out
+    assert _LAST_CLAUDE_CALL_TOOL["tool_name"] == "echo"
+    assert _LAST_CLAUDE_CALL_TOOL["tool_args"] == {"x": 1}
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "run"
+    assert rows[0]["mcp_proposed_by"] == "claude"
+    assert "echo" in rows[0]["claude_reasoning"]
+
+
+def test_mcp_claude_no_tool_use_prints_text_only(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks([_text_block("Just a thought, no tool needed.")]),
+    )
+    monkeypatch.setattr(
+        cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called
+    )
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Just a thought, no tool needed." in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "text-only"
+    assert rows[0]["mcp_proposed_by"] == "claude"
+
+
+def test_mcp_claude_multi_tool_use_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks(
+            [
+                _tool_use_block("echo", {"x": 1}),
+                _tool_use_block("echo", {"x": 2}),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called
+    )
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "Claude proposed 2 tool calls" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "rejected"
+    assert rows[0]["mcp_rejection_reason"] == "multi-tool"
+
+
+def test_mcp_claude_hallucinated_tool_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks([_tool_use_block("rm", {"path": "/"})]),
+    )
+    monkeypatch.setattr(
+        cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called
+    )
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "hallucination" in captured.err
+    assert "'rm'" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "rejected"
+    assert rows[0]["mcp_rejection_reason"] == "hallucinated-tool"
+
+
+def test_mcp_claude_aborts_on_n(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks([_tool_use_block("echo", {"x": 1})]),
+    )
+    monkeypatch.setattr(
+        cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "aborted"
+    assert rows[0]["mcp_proposed_by"] == "claude"
+
+
+def test_mcp_claude_requires_mcp_server(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rc = main(["--mcp-claude", "task"])
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "requires --mcp-server" in captured.err
+
+
+def test_mcp_claude_requires_api_key(monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "ANTHROPIC_API_KEY" in captured.err
+
+
+def test_mcp_claude_mutually_exclusive_with_other_modes(capsys):
+    for other in ("--exec", "--git", "--mcp-list-tools"):
+        with pytest.raises(SystemExit):
+            main(["--mcp-claude", other, "task"])
+    with pytest.raises(SystemExit):
+        main(["--mcp-claude", "--mcp-call-tool", "x", "task"])
+
+
+def test_mcp_claude_tool_isError_returns_5(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    async def _fake_call(server_argv, tool_name, tool_args):
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(text="tool failed")], isError=True
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(
+        cli_mod,
+        "Anthropic",
+        _make_anthropic_with_blocks([_tool_use_block("echo", {"x": 1})]),
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_call)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-claude", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "tool failed" in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_is_error"] is True
+
+
+def test_mcp_call_tool_history_now_has_proposed_by_user(tmp_path, monkeypatch):
+    """Forward-compat for slice-3 audit queries: slice-2 user-driven calls
+    must record mcp_proposed_by="user" so reports can distinguish them from
+    Claude-proposed calls."""
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_async_call_tool_recording)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        ["--mcp-call-tool", "echo", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 0
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_proposed_by"] == "user"
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)

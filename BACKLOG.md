@@ -19,4 +19,7 @@
 - [x] Git operations helper *(`--git` mode with strict read-only subcommand allowlist (10 entries); `branch`/`reflog` excluded due to write variants; mutually exclusive with `--exec`)*
 
 ## v0.2
-- [⏳] MCP integration *(slice 1+2 shipped: --mcp-list-tools and --mcp-call-tool with user-provided args; slice 3 will add Claude-driven tool selection)*
+- [x] MCP integration *(--mcp-list-tools, --mcp-call-tool, and --mcp-claude shipped; agent loop / multi-step deferred to v0.3)*
+
+## v0.3 (post-MCP)
+- [ ] Multi-step agent loop: Claude calls tool, sees result, decides next tool — with per-call y/N gates
