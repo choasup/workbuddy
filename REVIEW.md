@@ -1,17 +1,22 @@
-# Review of 7d85993
+# Review of 64269df
 
 ## Verdict
 PASS
 
 ## Findings
-- All 5 acceptance criteria checked off and behaviourally verified (`pytest -q` → 3 passed; `workbuddy "x"` echoes; no-arg → usage on stderr, exit 2).
-- `cli.main(argv=None)` is a clean testable surface; `_build_parser` factored out for readability.
-- `src/workbuddy/__main__.py` enables `python -m workbuddy`, matching one of the test paths in `tests/test_cli.py`.
-- `tests/test_cli.py` covers happy path, missing-arg (asserts non-zero exit + stderr), and module invocation via subprocess — solid spread.
-- Removal of `tests/test_placeholder.py` is justified: its `test_main_returns_zero` assumed the old zero-arg `main()` and broke under the new required positional. The import-smoke test it also contained is implicitly exercised by `from workbuddy.cli import main` in `test_cli.py`.
-- `from typing import Sequence` works on 3.10 (the floor in `pyproject.toml`); future cleanup could prefer `collections.abc.Sequence`, not blocking.
-- `pytest` still not declared as a dev dep in `pyproject.toml` — carry-over from prior review, still worth a follow-up chore.
+- All 8 acceptance criteria checked off and behaviourally verified (`pytest -q` → 4 passed independently with `ANTHROPIC_API_KEY` unset).
+- `pyproject.toml` adds `anthropic>=0.40` (lower-bound only, as specified).
+- `cli.py` reads `ANTHROPIC_API_KEY`, instantiates `Anthropic(api_key=...)`, calls `messages.create(model="claude-sonnet-4-6", max_tokens=1024, messages=[{"role":"user","content":<task>}])`, prints concatenated text blocks. Constants `DEFAULT_MODEL` / `MAX_TOKENS` are factored out — convenient for the upcoming `--model` flag.
+- Missing/empty `ANTHROPIC_API_KEY` → one-line stderr error and `return 1`; no raw stack trace.
+- Argparse missing-arg behaviour preserved (test still asserts non-zero `SystemExit` + stderr).
+- Tests stub the SDK via `monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)`. They assert not just the printed text but also the model string, the messages payload, and the `api_key=` init kwarg — the right invariants.
+- Bonus empty-`ANTHROPIC_API_KEY` test added; appropriate.
+- Module-invocation subprocess test dropped — explicitly allowed by NEXT.md's discretionary clause.
+- `_extract_text` defensively iterates content blocks and handles missing `.text`, leaving room for tool-use / structured blocks later.
+- LOC = 130 total (Python in `src/` + `tests/`); 500-LOC v0 ceiling intact.
+- Carry-overs from prior reviews still open: no `LICENSE` file, no `[project.optional-dependencies] dev = ["pytest"]`. Not blocking.
+- No request timeout / network-error handling on the SDK call — backlog already covers this in "Error handling: missing `ANTHROPIC_API_KEY`, network errors", so it'll be picked up next.
 
 ## Suggestions for next round
-- Next backlog item is Anthropic SDK integration — Planner should scope it tightly (read `ANTHROPIC_API_KEY`, single `messages.create` call, default model `claude-sonnet-4-6`, print response, no streaming yet).
-- Bundle the `LICENSE` file + `[project.optional-dependencies] dev = ["pytest"]` follow-up into a small chore task when convenient.
+- Planner should pick the next BACKLOG item: per-run logging to `~/.workbuddy/log.md` with UTC timestamps. Tight scope: append the task + response (truncated) + ISO8601 timestamp; create dir if missing; tests use `tmp_path` to redirect `~`.
+- Bundle a small chore task soon: add `LICENSE` file, declare `[project.optional-dependencies] dev = ["pytest"]`, optionally a request `timeout=` on the SDK call.
