@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workbuddy"
+version = "0.0.1"
+description = "Minimal Python CLI agent assistant backed by the Claude API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "workbuddy" }]
+dependencies = []
+
+[project.scripts]
+workbuddy = "workbuddy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
