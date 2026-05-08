@@ -15,3 +15,4 @@
 [2026-05-08T12:13:18Z] CODER → per-run logging to ~/.workbuddy/log.md implemented (WORKBUDDY_HOME override, OSError-tolerant, 4000-char truncate); 3 new tests + autouse fixture redirecting log to tmp_path; pytest 7 passed
 [2026-05-08T12:14:25Z] REVIEWER → 0df5af1 PASS
 [2026-05-08T12:14:56Z] PLANNER → Add `--model` flag to override the default Claude model
+[2026-05-08T12:15:49Z] CODER → --model flag added to argparse (default claude-sonnet-4-6); messages.create now uses args.model; +1 test asserting override; pytest 8 passed

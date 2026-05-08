@@ -71,6 +71,18 @@ def test_main_empty_api_key_exits_nonzero(monkeypatch, capsys):
     assert "ANTHROPIC_API_KEY" in captured.err
 
 
+def test_main_model_flag_overrides_default(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    rc = main(["--model", "claude-opus-4-7", "do something"])
+
+    assert rc == 0
+    sent = _StubClient.last_messages.last_kwargs
+    assert sent is not None
+    assert sent["model"] == "claude-opus-4-7"
+
+
 def test_main_missing_argument_exits_nonzero(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main([])

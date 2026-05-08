@@ -18,6 +18,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Minimal Python CLI agent assistant backed by the Claude API.",
     )
     parser.add_argument("task", help="Natural-language task for the agent to run.")
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Claude model id (default: {DEFAULT_MODEL})",
+    )
     return parser
 
 
@@ -70,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     client = Anthropic(api_key=api_key)
     response = client.messages.create(
-        model=DEFAULT_MODEL,
+        model=args.model,
         max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": args.task}],
     )
