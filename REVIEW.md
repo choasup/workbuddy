@@ -1,59 +1,26 @@
-# Review of 437b97b
+# Review of 8f22f88
 
 ## Verdict
-NEEDS_FIX
+PASS
 
-## What's right
-- All 43 tests pass independently with no env vars / no real git invocation. Implementation faithfully matches the NEXT.md spec.
-- The two safety properties NEXT.md asked for are correctly implemented:
-  1. `argv[0] != "git"` (line 210) is a literal-equality check that rejects `/usr/bin/git`, `./git`, `GIT`, `git2`, etc. The `test_git_rejects_argv0_path_variant` canary covers this.
-  2. `argv[1] not in READONLY_GIT_SUBCMDS` (line 230) rejects subcommands outside the allowlist BEFORE the y/N prompt is shown. Verified by the three explicit write-rejection tests + `_input_must_not_be_called` sentinel that would `AssertionError` if the rejection path ever fell through to `input()`.
-- `_load_git_context()` degrades gracefully — single warning + continue + `_GIT_CONTEXT_UNAVAILABLE` marker injected into the prompt.
-- argparse mutex group correctly forbids `--git --exec` together (verified by `test_git_and_exec_mutually_exclusive`).
-- Audit trail is solid: rejections write `git_decision="rejected"` with a `git_rejection_reason`, aborted runs write `git_decision="aborted"`, run completions write `git_decision="run"` with `git_exit`.
-- `READONLY_GIT_SUBCMDS` is a `frozenset` — set-membership is O(1) and the constant is immutable.
-
-## The blocker — allowlist membership ≠ "read-only subcommand"
-The spec said write subcommands MUST be rejected before the prompt. The allowlist enforces that at the **subcommand-name** level, but **two members of the allowlist have write variants**:
-
-- **`branch`** has destructive flags:
-  - `git branch -d <name>` deletes a (merged) branch
-  - `git branch -D <name>` force-deletes any branch (high blast radius — unmerged work can be lost; the reflog is the only recovery)
-  - `git branch -m <old> <new>` renames the current branch
-  - `git branch -c <old> <new>` copies a branch
-  - `git branch --delete --remotes <remote>/<name>` deletes a remote-tracking ref
-- **`reflog`** has destructive subcommands:
-  - `git reflog expire --expire=0 --all` permanently prunes the reflog (irreversible — reflog is git's last-resort recovery)
-  - `git reflog delete <ref>` removes a specific reflog entry
-
-Under the current implementation, the model could output `git branch -d feature/foo` or `git reflog expire --all`, the user would see the proposed command in the prompt, and a single `y` would execute it. That violates the slice 1 promise that "write subcommands MUST be rejected cold". The user *can* still see and reject, but the spec's safeguard is bypassed at the implementation level — the allowlist treats `branch` as inherently read-only when it isn't.
-
-`stash` was correctly omitted from the allowlist (it has `pop`, `drop`, `clear`, `apply`, `push` write variants). `branch` and `reflog` should get the same treatment, OR a second-level flag check.
-
-The Coder's implementation matches the spec literally. The hole is in the spec — but it's a real safety hole and the next round MUST address it before the BACKLOG item can be marked `[x]`.
-
-## What needs to change (next CODER round)
-Pick ONE of these two strategies — Planner's call:
-
-**Strategy A — tighten the allowlist (simpler, stricter, drops some legitimate read uses):**
-- Remove `branch` and `reflog` from `READONLY_GIT_SUBCMDS`.
-- Recommend users invoke `git status` / `git log --decorate` for the same information.
-- Add a test: `git branch -d feature` is now cold-rejected (no prompt), `git reflog expire --all` is cold-rejected.
-
-**Strategy B — second-level write-flag rejection (preserves read uses but more code):**
-- After `argv[1]` allowlist check passes, if `argv[1] == "branch"`, scan `argv[2:]` for any of `{-d, -D, -m, -c, -M, -C, --delete, --move, --copy, --rename, --create, --force}`. Reject if found.
-- If `argv[1] == "reflog"` and `len(argv) >= 3`, reject if `argv[2] in {"expire", "delete"}`. Allow if missing or `argv[2] == "show"`.
-- Add tests: `git branch -d feature` rejected, `git branch` (list) accepted, `git reflog expire --all` rejected, `git reflog show HEAD` accepted, `git reflog` (defaults to show) accepted.
-
-I'd suggest Strategy A for slice 1 (it's a 2-line change + a test), and treat Strategy B as a future enhancement when --allow-write lands.
-
-## Other (non-blocking) observations
-- Global git options before the subcommand are rejected by the simple `argv[1]` check: `git --no-pager log` becomes `argv[1]="--no-pager"`, not on allowlist → cold-rejected. This is a usability papercut but not a safety issue. Slice 2 could skip leading dashed args before checking the subcommand.
-- PATH manipulation (a malicious `git` symlink earlier in PATH) is outside workbuddy's threat model — the literal-`"git"` check resolves via `subprocess.run`'s PATH lookup. Documenting this as out-of-scope is fine.
-- LOC = 1066, ~18% over the planner's `~900` soft target. The bulk is the test setup helpers and the deliberately-named-per-subcommand rejection tests; collapsing via parametrize would hurt diagnosability. Acceptable.
-- `_load_git_context` returns its own warning string before returning the unavailable marker — but the unavailable marker itself only mentions the Branch label even when the failure was on Status or Recent commits. Cosmetic.
+## Findings
+- The `437b97b` NEEDS_FIX is now properly addressed. `READONLY_GIT_SUBCMDS` contains exactly 10 entries, all strictly read-only: `blame, describe, diff, log, ls-files, name-rev, rev-parse, shortlog, show, status`. Verified by importing the module and inspecting the frozenset.
+- All 6 new cold-rejection tests pass:
+  - `git branch -d feature` → exit 4, recorder shows ONLY context calls (no `branch` invocation), stderr contains `` rejects subcommand `branch` ``
+  - `git branch -D feature` → same
+  - `git branch -m oldname newname` → same
+  - `git branch` (plain listing) → same — deliberate trade-off
+  - `git reflog expire --expire=0 --all` → same with `reflog`
+  - `git reflog show HEAD` → same — deliberate trade-off
+- `pytest -q` → 49 passed independently. All 43 prior tests preserved unchanged (verified by audit; no test referenced `git branch` or `git reflog` as model output, so no positive-case test needed reworking).
+- The user-message prompt construction in `main()` is correctly synced to the new 10-entry list — the model won't be told to propose `branch` or `reflog` only to hit a cold-rejection, which would be a UX papercut.
+- The two trade-off docstrings (on `test_git_branch_list_is_now_cold_rejected` and `test_git_reflog_show_is_now_cold_rejected`) are an excellent maintainability touch — they explicitly tell a future maintainer NOT to "fix" the rejection by re-adding the subcommand without flag-level write checks. This kind of "rationale-as-test-docstring" pattern protects against the most common regression mode (someone reading just the test name and "fixing" it without context).
+- README's allowlist enumeration matches the code, and the new explanation paragraph guides users to `--exec` for read-only branch/reflog inspection without requiring them to discover that themselves.
+- LOC = 1157 — slightly over the planner's `~1150` soft target (~7 LOC). The overshoot is the two trade-off docstrings; trimming them would defeat their purpose. Acceptable.
+- The cold-rejection guarantee is now honest: **every subcommand for which the user sees a y/N prompt is strictly read-only**. The promise from slice 1 is restored.
 
 ## Suggestions for next round
-- **Required next CODER round**: implement Strategy A or B above. Per PLANNER.md ("If REVIEW.md says NEEDS_FIX or FAIL on the latest commit, the next task MUST be fixing those issues"), the Planner's next pick is the fix, not a new feature.
-- After the fix lands and the `[⏳]` flips to `[x]`, the v0.1 BACKLOG section is fully done — only v0.2 (MCP integration) remains.
-- Reiterating: this is still a good place to pause the cron. The git-operations slice was the riskiest piece of v0.1, and the slip we're seeing in this round (allowlist correctness) is exactly why human review on security-sensitive scope is valuable.
+- BACKLOG `Git operations helper` is now ready to flip from `[⏳]` to `[x]`. With this round PASS-ing, all v0.1 items are shipped.
+- v0.1 is now complete (3/3 items done): persistent state, shell exec, git ops. Only v0.2 (MCP integration) remains.
+- **Strong recommendation: pause the cron here**. The autobuddy run has now driven workbuddy from bootstrap → v0 (8 items + polish) → v0.1 (3 items, including one NEEDS_FIX recovery) across ~50 productive rounds. v0.2 is a substantial scope shift (MCP is a protocol implementation, not a CLI feature) and benefits from human design input. The CronDelete ID is `bbee383b`.
+- If the cron continues, v0.2 should be sliced very small for the first round — e.g. just "add a `--mcp-stdio` flag that connects to a stdio MCP server, lists available tools, and prints them; no tool execution yet" — to keep risk bounded while the design firms up.
