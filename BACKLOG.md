@@ -7,7 +7,7 @@
 - [x] Append responses to `~/.workbuddy/log.md` with UTC timestamps
 - [x] Add `--model` flag (default `claude-sonnet-4-6`)
 - [x] Error handling: missing `ANTHROPIC_API_KEY`, network errors
-- [⏳] README usage section with install + example
+- [x] README usage section with install + example
 - [ ] Unit tests for CLI parsing and log writer
 
 ## v0.1
