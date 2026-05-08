@@ -26,3 +26,4 @@
 [2026-05-08T12:23:52Z] PLANNER → Cover remaining helper edge cases with direct unit tests for _extract_text and _log_run
 [2026-05-08T12:25:11Z] CODER → +7 helper tests (_extract_text: multi-block, missing .text, empty list, None content; _log_run: truncation, nested-dir creation, OSError tolerance via blocking-file WORKBUDDY_HOME); no production-code changes; pytest 16 passed
 [2026-05-08T12:25:58Z] REVIEWER → 752f277 PASS — v0 FEATURE COMPLETE (8/8 backlog items shipped)
+[2026-05-08T12:27:19Z] PLANNER → v0 polish — add LICENSE, declare dev test extra, bump README "Status" to v0

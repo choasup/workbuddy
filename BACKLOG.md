@@ -10,6 +10,9 @@
 - [x] README usage section with install + example
 - [x] Unit tests for CLI parsing and log writer
 
+## v0 polish (after MVP, before v0.1)
+- [⏳] Add `LICENSE` (MIT), declare `[project.optional-dependencies] dev = ["pytest>=7"]`, bump README "Status" from `Pre-v0` to `v0 — feature complete`
+
 ## v0.1
 - [ ] Persistent local state (config, history) under `~/.workbuddy/`
 - [ ] Shell execution mode with confirmation prompt
