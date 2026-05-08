@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 MAX_LOGGED_RESPONSE_CHARS = 4000
+REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -73,12 +74,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=args.model,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": args.task}],
-    )
+    client = Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = client.messages.create(
+            model=args.model,
+            max_tokens=MAX_TOKENS,
+            messages=[{"role": "user", "content": args.task}],
+        )
+    except APIError as exc:
+        print(
+            f"error: API call failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     text = _extract_text(response)
     print(text)
     _log_run(args.task, text)

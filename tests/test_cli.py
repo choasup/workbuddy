@@ -1,9 +1,15 @@
 import types
 
+import anthropic
 import pytest
 
 import workbuddy.cli as cli_mod
 from workbuddy.cli import main
+
+
+class _FakeAPIError(anthropic.APIError):
+    def __init__(self, msg: str = "boom"):
+        Exception.__init__(self, msg)
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +47,9 @@ def test_main_calls_anthropic_and_prints_response(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "stubbed-claude-reply" in captured.out
-    assert _StubClient.last_init_kwargs == {"api_key": "sk-test"}
+    assert _StubClient.last_init_kwargs is not None
+    assert _StubClient.last_init_kwargs["api_key"] == "sk-test"
+    assert _StubClient.last_init_kwargs.get("timeout") == 60.0
     assert _StubClient.last_messages is not None
     sent = _StubClient.last_messages.last_kwargs
     assert sent is not None
@@ -81,6 +89,28 @@ def test_main_model_flag_overrides_default(monkeypatch, capsys):
     sent = _StubClient.last_messages.last_kwargs
     assert sent is not None
     assert sent["model"] == "claude-opus-4-7"
+
+
+def test_main_api_error_exits_nonzero_and_does_not_log(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise _FakeAPIError("network is on fire")
+
+    class _RaisingClient:
+        def __init__(self, **kwargs):
+            self.messages = _RaisingMessages()
+
+    monkeypatch.setattr(cli_mod, "Anthropic", _RaisingClient)
+
+    rc = main(["task"])
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "API call failed" in captured.err
+    assert "_FakeAPIError" in captured.err
+    assert not (tmp_path / "log.md").exists()
 
 
 def test_main_missing_argument_exits_nonzero(capsys):
