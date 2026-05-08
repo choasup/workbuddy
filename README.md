@@ -51,4 +51,4 @@ Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, 
 
 ## Status
 
-Pre-v0. See `BACKLOG.md`.
+v0 — feature complete. See `BACKLOG.md` for v0.1 and beyond.

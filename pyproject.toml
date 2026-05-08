@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "workbuddy" }]
 dependencies = ["anthropic>=0.40"]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [project.scripts]
 workbuddy = "workbuddy.cli:main"
 

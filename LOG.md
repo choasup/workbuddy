@@ -27,3 +27,4 @@
 [2026-05-08T12:25:11Z] CODER → +7 helper tests (_extract_text: multi-block, missing .text, empty list, None content; _log_run: truncation, nested-dir creation, OSError tolerance via blocking-file WORKBUDDY_HOME); no production-code changes; pytest 16 passed
 [2026-05-08T12:25:58Z] REVIEWER → 752f277 PASS — v0 FEATURE COMPLETE (8/8 backlog items shipped)
 [2026-05-08T12:27:19Z] PLANNER → v0 polish — add LICENSE, declare dev test extra, bump README "Status" to v0
+[2026-05-08T12:28:16Z] CODER → LICENSE (MIT) added; pyproject.toml [project.optional-dependencies] dev = ["pytest>=7"]; README Status bumped to "v0 — feature complete"; pip install -e ".[dev]" verified; pytest 16 still passing
