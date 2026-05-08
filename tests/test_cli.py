@@ -4,7 +4,12 @@ import anthropic
 import pytest
 
 import workbuddy.cli as cli_mod
-from workbuddy.cli import main
+from workbuddy.cli import (
+    MAX_LOGGED_RESPONSE_CHARS,
+    _extract_text,
+    _log_run,
+    main,
+)
 
 
 class _FakeAPIError(anthropic.APIError):
@@ -119,6 +124,73 @@ def test_main_missing_argument_exits_nonzero(capsys):
     assert excinfo.value.code != 0
     captured = capsys.readouterr()
     assert captured.err
+
+
+def _resp(*texts):
+    blocks = [types.SimpleNamespace(text=t) for t in texts]
+    return types.SimpleNamespace(content=blocks)
+
+
+def test_extract_text_concatenates_multiple_blocks():
+    response = _resp("hello ", "world", "!")
+    assert _extract_text(response) == "hello world!"
+
+
+def test_extract_text_skips_blocks_without_text():
+    response = types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(text="keep"),
+            types.SimpleNamespace(),  # no .text attribute
+            types.SimpleNamespace(text=None),  # .text is None
+            types.SimpleNamespace(text="end"),
+        ]
+    )
+    assert _extract_text(response) == "keepend"
+
+
+def test_extract_text_empty_content_list():
+    assert _extract_text(types.SimpleNamespace(content=[])) == ""
+
+
+def test_extract_text_none_content():
+    assert _extract_text(types.SimpleNamespace(content=None)) == ""
+
+
+def test_log_run_truncates_long_response(tmp_path):
+    long_text = "x" * (MAX_LOGGED_RESPONSE_CHARS + 100)
+    tail_marker = "TAIL_MARKER_SHOULD_NOT_APPEAR"
+    long_text_with_tail = long_text + tail_marker
+
+    _log_run("t", long_text_with_tail)
+
+    contents = (tmp_path / "log.md").read_text(encoding="utf-8")
+    assert "... [truncated]" in contents
+    assert tail_marker not in contents
+
+
+def test_log_run_creates_nested_directories(tmp_path, monkeypatch):
+    nested = tmp_path / "deep" / "nested" / "wb"
+    monkeypatch.setenv("WORKBUDDY_HOME", str(nested))
+
+    _log_run("nested-task", "nested-response")
+
+    log_file = nested / "log.md"
+    assert log_file.exists()
+    contents = log_file.read_text(encoding="utf-8")
+    assert "nested-task" in contents
+    assert "nested-response" in contents
+
+
+def test_log_run_handles_oserror_without_raising(tmp_path, monkeypatch, capsys):
+    blocking_file = tmp_path / "imafile"
+    blocking_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("WORKBUDDY_HOME", str(blocking_file))
+
+    result = _log_run("t", "r")
+
+    assert result is None
+    captured = capsys.readouterr()
+    assert "warning" in captured.err
 
 
 def test_successful_run_appends_log(tmp_path, monkeypatch):
