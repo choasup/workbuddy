@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "workbuddy" }]
-dependencies = []
+dependencies = ["anthropic>=0.40"]
 
 [project.scripts]
 workbuddy = "workbuddy.cli:main"
