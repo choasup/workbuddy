@@ -37,6 +37,14 @@ workbuddy --exec "list git branches sorted by commit date"
 
 Each proposed command is shown for explicit `y/N` confirmation. Commands run with `shell=False` and arguments parsed via `shlex.split`, so shell metacharacters in the proposed command (`;`, `|`, `&&`, `>`, `$(...)`, backticks, etc.) are not expanded. The default answer is no — empty input or EOF aborts.
 
+Pass `--git` for a read-only git helper that auto-loads `git status`, the current branch, and recent commits as context for Claude:
+
+```bash
+workbuddy --git "what changed on this branch since main"
+```
+
+`--git` enforces a read-only subcommand allowlist (`status`, `log`, `diff`, `branch`, `show`, `blame`, `rev-parse`, `ls-files`, `describe`, `reflog`, `shortlog`, `name-rev`). Write subcommands like `commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `clean`, etc. are rejected before the confirmation prompt is even shown — an accidental `y` cannot trigger a write. `--git` and `--exec` are mutually exclusive.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.

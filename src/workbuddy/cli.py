@@ -15,6 +15,23 @@ MAX_TOKENS = 1024
 MAX_LOGGED_RESPONSE_CHARS = 4000
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_HISTORY_ROWS = 1000
+GIT_CONTEXT_TIMEOUT_SECONDS = 10
+READONLY_GIT_SUBCMDS = frozenset(
+    {
+        "status",
+        "log",
+        "diff",
+        "branch",
+        "show",
+        "blame",
+        "rev-parse",
+        "ls-files",
+        "describe",
+        "reflog",
+        "shortlog",
+        "name-rev",
+    }
+)
 
 
 def _config_path() -> Path:
@@ -60,11 +77,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=effective_default,
         help=f"Claude model id (default: {effective_default})",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--exec",
         action="store_true",
         default=False,
         help="Ask Claude for a single shell command and execute it after y/N confirmation",
+    )
+    mode_group.add_argument(
+        "--git",
+        action="store_true",
+        default=False,
+        help=(
+            "Read-only git helper: loads repo context, runs a Claude-proposed git read "
+            "command after y/N confirmation. Write subcommands are blocked"
+        ),
     )
     return parser
 
@@ -123,6 +150,117 @@ def _log_run(task: str, response_text: str) -> None:
         print(f"warning: failed to append run to log: {exc}", file=sys.stderr)
 
 
+_GIT_CONTEXT_UNAVAILABLE = (
+    "[Branch: (unknown — not a git repository or git unavailable)]"
+)
+
+
+def _load_git_context() -> str:
+    cmds = [
+        ("Branch", ["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        ("Status", ["git", "status", "--porcelain=v1"]),
+        ("Recent commits", ["git", "log", "--oneline", "-10"]),
+    ]
+    parts = []
+    for label, cmd in cmds:
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=False,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GIT_CONTEXT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"warning: git context unavailable: {exc}", file=sys.stderr)
+            return _GIT_CONTEXT_UNAVAILABLE
+        if result.returncode != 0:
+            print(
+                f"warning: git context unavailable: {label} query failed",
+                file=sys.stderr,
+            )
+            return _GIT_CONTEXT_UNAVAILABLE
+        parts.append(f"[{label}: {result.stdout.strip()}]")
+    return "\n".join(parts)
+
+
+def _run_git(args, text: str) -> int:
+    command_text = text.strip()
+    if not command_text:
+        print("error: model returned no command", file=sys.stderr)
+        return 3
+    try:
+        argv_list = shlex.split(command_text)
+    except ValueError as exc:
+        print(f"error: model returned no command: {exc}", file=sys.stderr)
+        return 3
+    if not argv_list:
+        print("error: model returned no command", file=sys.stderr)
+        return 3
+
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "task": args.task,
+        "model": args.model,
+        "response_chars": len(text),
+        "git_command": command_text,
+    }
+
+    if argv_list[0] != "git":
+        reason = f"command does not start with `git` (got: {argv_list[0]})"
+        print(
+            f"error: --git mode requires the proposed command to start with `git` "
+            f"(got: {argv_list[0]})",
+            file=sys.stderr,
+        )
+        record["git_decision"] = "rejected"
+        record["git_rejection_reason"] = reason
+        _append_history(record)
+        return 4
+
+    if len(argv_list) < 2:
+        print("error: --git mode requires a subcommand", file=sys.stderr)
+        record["git_decision"] = "rejected"
+        record["git_rejection_reason"] = "missing subcommand"
+        _append_history(record)
+        return 4
+
+    sub = argv_list[1]
+    if sub not in READONLY_GIT_SUBCMDS:
+        print(
+            f"error: --git mode rejects subcommand `{sub}` "
+            f"(write subcommands need a separate --allow-write flag, not yet supported)",
+            file=sys.stderr,
+        )
+        record["git_decision"] = "rejected"
+        record["git_rejection_reason"] = (
+            f"subcommand `{sub}` is not in the read-only allowlist"
+        )
+        _append_history(record)
+        return 4
+
+    print(f"Proposed command: {command_text}")
+    sys.stderr.write("Run this command? [y/N]: ")
+    sys.stderr.flush()
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+
+    if answer.strip() not in {"y", "Y"}:
+        print("aborted", file=sys.stderr)
+        record["git_decision"] = "aborted"
+        _append_history(record)
+        return 0
+
+    result = subprocess.run(argv_list, shell=False, check=False)
+    record["git_decision"] = "run"
+    record["git_exit"] = result.returncode
+    _append_history(record)
+    return result.returncode
+
+
 def _run_exec(args, text: str) -> int:
     command_text = text.strip()
     if not command_text:
@@ -178,7 +316,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    if args.exec:
+    if args.git:
+        git_context = _load_git_context()
+        user_content = (
+            "Reply with exactly ONE git read-only command. "
+            "No commentary, no markdown, no fences. "
+            "Allowed subcommands: status, log, diff, branch, show, blame, "
+            "rev-parse, ls-files, describe, reflog, shortlog, name-rev. "
+            "Repository context follows.\n\n"
+            f"{git_context}\n\n"
+            f"Task: {args.task}"
+        )
+    elif args.exec:
         user_content = (
             f"Reply with exactly ONE POSIX shell command. "
             f"No commentary, no markdown, no fences. Task: {args.task}"
@@ -201,6 +350,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     text = _extract_text(response)
 
+    if args.git:
+        return _run_git(args, text)
     if args.exec:
         return _run_exec(args, text)
 

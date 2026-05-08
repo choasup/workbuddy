@@ -269,13 +269,17 @@ def _make_stub_client_returning(text: str):
 
 
 class _SubprocessRecorder:
-    def __init__(self, returncode: int = 0):
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
         self.calls: list[dict] = []
         self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
     def run(self, *args, **kwargs):
         self.calls.append({"args": args, "kwargs": kwargs})
-        return types.SimpleNamespace(returncode=self.returncode)
+        return types.SimpleNamespace(
+            returncode=self.returncode, stdout=self.stdout, stderr=self.stderr
+        )
 
 
 def _install_subprocess_recorder(monkeypatch, recorder: _SubprocessRecorder) -> None:
@@ -397,6 +401,169 @@ def test_exec_history_records_run_decision_and_exit(tmp_path, monkeypatch):
     assert row["exec_command"] == "echo hi"
     assert row["exec_decision"] == "run"
     assert row["exec_exit"] == 7
+
+
+_GIT_CONTEXT_CALL_COUNT = 3  # branch, status, log
+
+
+def _input_must_not_be_called(*a, **k):
+    raise AssertionError("input() should not be called for rejected/cold paths")
+
+
+def _setup_git_test(monkeypatch, model_text: str, recorder: _SubprocessRecorder):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning(model_text))
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+
+def test_git_runs_status_after_yes(tmp_path, monkeypatch):
+    recorder = _SubprocessRecorder(returncode=0, stdout="main\n")
+    _setup_git_test(monkeypatch, "git status", recorder)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--git", "task"])
+
+    assert rc == 0
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT + 1
+    # context calls
+    assert recorder.calls[0]["args"][0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    assert recorder.calls[1]["args"][0] == ["git", "status", "--porcelain=v1"]
+    assert recorder.calls[2]["args"][0] == ["git", "log", "--oneline", "-10"]
+    # user-confirmed call
+    user_call = recorder.calls[_GIT_CONTEXT_CALL_COUNT]
+    assert user_call["args"][0] == ["git", "status"]
+    assert user_call["kwargs"].get("shell") is False
+
+
+def test_git_rejects_non_git_argv0(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "rm -rf /", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT  # only context, no rm
+    captured = capsys.readouterr()
+    assert "start with `git`" in captured.err
+    assert "Run this command?" not in captured.err
+
+
+def test_git_rejects_write_subcommand_commit(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git commit -m foo", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `commit`" in captured.err
+    assert "Run this command?" not in captured.err
+
+
+def test_git_rejects_write_subcommand_push(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git push origin main", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `push`" in captured.err
+
+
+def test_git_rejects_write_subcommand_reset(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git reset --hard HEAD~", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `reset`" in captured.err
+
+
+def test_git_rejects_argv0_path_variant(tmp_path, monkeypatch, capsys):
+    """Literal-equality on argv[0] rejects /usr/bin/git, ./git, GIT, etc."""
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "/usr/bin/git status", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "start with `git`" in captured.err
+
+
+def test_git_and_exec_mutually_exclusive(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    with pytest.raises(SystemExit) as ei:
+        main(["--git", "--exec", "task"])
+    assert ei.value.code != 0
+    captured = capsys.readouterr()
+    assert ("not allowed with" in captured.err) or ("--git" in captured.err)
+
+
+def test_git_aborts_on_n_with_history(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git status", recorder)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    rc = main(["--git", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["git_decision"] == "aborted"
+    assert "git_exit" not in rows[0]
+
+
+def test_git_rejection_writes_history_record(tmp_path, monkeypatch):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git commit -m x", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["git_decision"] == "rejected"
+    assert "git_rejection_reason" in rows[0]
+    assert "commit" in rows[0]["git_rejection_reason"]
+
+
+def test_git_context_failure_warns_and_continues(tmp_path, monkeypatch, capsys):
+    """If the branch query fails (not a git repo), warn and still proceed to API."""
+    recorder = _SubprocessRecorder(returncode=128, stdout="", stderr="not a git repo")
+    _setup_git_test(monkeypatch, "git status", recorder)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--git", "task"])
+
+    captured = capsys.readouterr()
+    # Warning was emitted AND main proceeded all the way through to the user-confirmed
+    # subprocess call (rc reflects the recorder's stub returncode for that call).
+    assert "warning: git context unavailable" in captured.err
+    assert rc == 128
+    # Single failed context call (returns early on first failure) + the user-confirmed call
+    assert any(call["args"][0] == ["git", "status"] for call in recorder.calls)
 
 
 def test_exec_aborted_history_record(tmp_path, monkeypatch):
