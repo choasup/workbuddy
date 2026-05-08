@@ -855,6 +855,21 @@ async def _async_call_tool_returning(text: str, is_error: bool = False):
     return _fake
 
 
+def _make_async_call_tool_scripted(scripted_outputs):
+    """Returns an async fake that pops one (text, is_error) per call."""
+    queue = list(scripted_outputs)
+
+    async def _fake(server_argv, tool_name, tool_args):
+        if not queue:
+            raise AssertionError("ran out of scripted call_tool outputs")
+        text, is_error = queue.pop(0)
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(text=text)], isError=is_error
+        )
+
+    return _fake
+
+
 def _setup_agent_test(monkeypatch, server_tools_names, anthropic_responses, call_tool_text="result"):
     server_tools = [
         types.SimpleNamespace(name=n, description="", inputSchema={})
@@ -1080,6 +1095,128 @@ def test_mcp_agent_text_only_first_response_is_final(tmp_path, monkeypatch, caps
     assert len(rows) == 1
     assert rows[0]["mcp_decision"] == "final-text"
     assert rows[0]["turn_index"] == 0
+
+
+def test_mcp_agent_one_error_then_success_continues(tmp_path, monkeypatch, capsys):
+    """Single tool error doesn't trip the consecutive-error abort. Counter resets on success."""
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    AnthropicCls, scripted = _make_scripted_anthropic(
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_text_response("done"),
+        ]
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("err1", True), ("ok2", False)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    assert len(scripted.create_calls) == 3
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 3
+    assert rows[0]["mcp_is_error"] is True
+    assert rows[1]["mcp_is_error"] is False
+    assert rows[2]["mcp_decision"] == "final-text"
+
+
+def test_mcp_agent_two_consecutive_errors_aborts(tmp_path, monkeypatch, capsys):
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    AnthropicCls, scripted = _make_scripted_anthropic(
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_text_response("never reached"),
+        ]
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("err1", True), ("err2", True)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 8
+    captured = capsys.readouterr()
+    assert "2 consecutive tool errors" in captured.err
+    # The third Anthropic response should NEVER be requested
+    assert len(scripted.create_calls) == 2
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 3
+    assert rows[0]["mcp_decision"] == "run"
+    assert rows[0]["mcp_is_error"] is True
+    assert rows[1]["mcp_decision"] == "run"
+    assert rows[1]["mcp_is_error"] is True
+    assert rows[2]["mcp_decision"] == "consecutive-error-abort"
+    assert rows[2]["consecutive_errors"] == 2
+
+
+def test_mcp_agent_error_then_success_then_error_continues(tmp_path, monkeypatch, capsys):
+    """Non-consecutive errors don't trip the abort (counter resets on success)."""
+    server_tools = [types.SimpleNamespace(name="echo", description="", inputSchema={})]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    AnthropicCls, scripted = _make_scripted_anthropic(
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_tool_use_response("echo", {"x": 3}, tu_id="t3"),
+        ]
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("err1", True), ("ok", False), ("err3", True)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-max-turns", "3", "--mcp-server", "fake", "task"]
+    )
+
+    # Three tool_use responses + max_turns=3 means after turn 3 we hit max-turns
+    assert rc == 7
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 4
+    assert rows[0]["mcp_is_error"] is True
+    assert rows[1]["mcp_is_error"] is False
+    assert rows[2]["mcp_is_error"] is True
+    assert rows[3]["mcp_decision"] == "max-turns-reached"
 
 
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):

@@ -20,6 +20,7 @@ GIT_CONTEXT_TIMEOUT_SECONDS = 10
 MCP_TIMEOUT_SECONDS = 30
 DEFAULT_AGENT_TURNS = 3
 MAX_AGENT_TURNS_HARD_CAP = 5
+MAX_CONSECUTIVE_ERRORS = 2
 READONLY_GIT_SUBCMDS = frozenset(
     {
         "status",
@@ -326,6 +327,7 @@ def _run_mcp_agent(args) -> int:
     client = Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
     messages = [{"role": "user", "content": args.task}]
     max_turns = args.mcp_agent_max_turns
+    consecutive_errors = 0
 
     for turn_index in range(max_turns):
         create_kwargs = {
@@ -471,6 +473,23 @@ def _run_mcp_agent(args) -> int:
         record["response_chars"] = len(text)
         record["claude_reasoning"] = joined_text
         _append_history(record)
+
+        if is_error:
+            consecutive_errors += 1
+        else:
+            consecutive_errors = 0
+
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            print(
+                f"error: --mcp-agent aborting at turn {turn_index + 1}: "
+                f"{consecutive_errors} consecutive tool errors (limit: {MAX_CONSECUTIVE_ERRORS})",
+                file=sys.stderr,
+            )
+            abort_record = dict(base_record)
+            abort_record["mcp_decision"] = "consecutive-error-abort"
+            abort_record["consecutive_errors"] = consecutive_errors
+            _append_history(abort_record)
+            return 8
 
         messages.append({"role": "assistant", "content": list(content)})
         messages.append(
