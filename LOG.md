@@ -20,3 +20,4 @@
 [2026-05-08T12:17:45Z] PLANNER → Handle Anthropic SDK network and API errors gracefully (no stack traces to the user)
 [2026-05-08T12:19:11Z] CODER → APIError caught (exit 2, stderr "API call failed: ..."); Anthropic(timeout=60.0); +1 test for the error path. NOTE: existing happy-path test's exact-equality assertion on init kwargs was loosened to check api_key + timeout contract since adding timeout was in-scope. pytest 9 passed
 [2026-05-08T12:19:53Z] REVIEWER → 493a037 PASS
+[2026-05-08T12:20:49Z] PLANNER → Add a README usage section with install command and a working example
