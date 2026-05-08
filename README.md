@@ -67,7 +67,15 @@ Pass `--mcp-claude` to ask Claude to pick ONE MCP tool for your task and execute
 workbuddy --mcp-claude --mcp-server "python -m my_server" "echo hi to the world"
 ```
 
-`--mcp-claude` is single-shot only — Claude picks at most one tool. Multi-step / agent-loop is intentionally not in this slice (deferred to v0.3 with separate human design). Defenses: (1) Claude's proposed tool name MUST be one of the actual tools the server advertised — hallucinated names are cold-rejected before the prompt; (2) if Claude proposes more than one tool call, the run is cold-rejected; (3) non-dict tool args are cold-rejected; (4) the `y/N` gate is the same strict default-no contract as other modes. The user sees Claude's reasoning text prefixed with `Claude:` and the proposed call before confirming. `--mcp-claude` is mutually exclusive with `--exec`, `--git`, `--mcp-list-tools`, and `--mcp-call-tool`.
+`--mcp-claude` is single-shot only — Claude picks at most one tool. Multi-step is `--mcp-agent` (below). Defenses: (1) Claude's proposed tool name MUST be one of the actual tools the server advertised — hallucinated names are cold-rejected before the prompt; (2) if Claude proposes more than one tool call, the run is cold-rejected; (3) non-dict tool args are cold-rejected; (4) the `y/N` gate is the same strict default-no contract as other modes. The user sees Claude's reasoning text prefixed with `Claude:` and the proposed call before confirming. `--mcp-claude` is mutually exclusive with `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, and `--mcp-agent`.
+
+Pass `--mcp-agent` for a bounded multi-step loop where Claude calls a tool, sees the result, and decides the next tool — with a y/N gate at every turn:
+
+```bash
+workbuddy --mcp-agent --mcp-server "python -m my_server" "find the file with the most lines and print its first 5"
+```
+
+Defaults to 3 turns; `--mcp-agent-max-turns N` (capped at 5, hard) overrides. Each turn: Claude proposes ONE tool call (multi-tool-per-turn is cold-rejected — parallel tool calls are deferred), workbuddy shows Claude's reasoning + the proposed call + `Turn N/M`, you confirm with `y` (default no), the tool runs, and the result is fed back to Claude for the next turn. You can abort at any turn with `n` — the loop stops and exits 0. If the loop hits `max_turns` without a final-text response from Claude, it exits 7. Hallucinated tool names and non-dict inputs are cold-rejected per turn. `--mcp-agent` is mutually exclusive with all other mode flags.
 
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 

@@ -18,6 +18,8 @@ REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_HISTORY_ROWS = 1000
 GIT_CONTEXT_TIMEOUT_SECONDS = 10
 MCP_TIMEOUT_SECONDS = 30
+DEFAULT_AGENT_TURNS = 3
+MAX_AGENT_TURNS_HARD_CAP = 5
 READONLY_GIT_SUBCMDS = frozenset(
     {
         "status",
@@ -118,6 +120,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "Ask Claude to pick ONE MCP tool for the task and execute it after y/N "
             "confirmation. Reads tools from --mcp-server. Single-shot (no agent loop)"
         ),
+    )
+    mode_group.add_argument(
+        "--mcp-agent",
+        action="store_true",
+        default=False,
+        help=(
+            "Bounded multi-step agent loop: Claude calls tool, sees result, decides next "
+            "tool. Per-turn y/N confirmation. Default 3 turns, capped at 5"
+        ),
+    )
+    parser.add_argument(
+        "--mcp-agent-max-turns",
+        type=int,
+        default=DEFAULT_AGENT_TURNS,
+        help=f"Maximum agent turns (default: {DEFAULT_AGENT_TURNS}, hard cap: {MAX_AGENT_TURNS_HARD_CAP})",
     )
     parser.add_argument(
         "--mcp-server",
@@ -247,6 +264,244 @@ async def _async_call_tool(server_argv: list[str], tool_name: str, tool_args: di
         async with ClientSession(read, write) as session:
             await session.initialize()
             return await session.call_tool(tool_name, tool_args)
+
+
+def _run_mcp_agent(args) -> int:
+    raw = args.mcp_server or ""
+    try:
+        server_argv = shlex.split(raw)
+    except ValueError as exc:
+        print(f"error: invalid --mcp-server: {exc}", file=sys.stderr)
+        return 5
+    if not server_argv:
+        print("error: invalid --mcp-server: empty command", file=sys.stderr)
+        return 5
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print(
+            "error: ANTHROPIC_API_KEY environment variable is not set",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        tools = asyncio.run(
+            asyncio.wait_for(
+                _async_list_tools(server_argv), timeout=MCP_TIMEOUT_SECONDS
+            )
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        print(
+            f"error: MCP server did not respond within {MCP_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return 6
+    except Exception as exc:
+        print(f"error: MCP error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 5
+
+    tool_names = [getattr(t, "name", "") for t in tools]
+    tools_payload = []
+    for t in tools:
+        schema = (
+            getattr(t, "inputSchema", None)
+            or getattr(t, "input_schema", None)
+            or {}
+        )
+        tools_payload.append(
+            {
+                "name": getattr(t, "name", "") or "",
+                "description": getattr(t, "description", "") or "",
+                "input_schema": schema,
+            }
+        )
+
+    if not tools_payload:
+        print(
+            "note: server advertised no tools; passing task to Claude as text only",
+            file=sys.stderr,
+        )
+
+    client = Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
+    messages = [{"role": "user", "content": args.task}]
+    max_turns = args.mcp_agent_max_turns
+
+    for turn_index in range(max_turns):
+        create_kwargs = {
+            "model": args.model,
+            "max_tokens": MAX_TOKENS,
+            "messages": messages,
+        }
+        if tools_payload:
+            create_kwargs["tools"] = tools_payload
+        try:
+            response = client.messages.create(**create_kwargs)
+        except APIError as exc:
+            print(
+                f"error: API call failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+        content = list(getattr(response, "content", []) or [])
+        text_parts = [
+            getattr(b, "text", "") or ""
+            for b in content
+            if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+        ]
+        tool_uses = [b for b in content if getattr(b, "type", None) == "tool_use"]
+        joined_text = "".join(text_parts)
+
+        base_record = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "task": args.task,
+            "model": args.model,
+            "response_chars": 0,
+            "mcp_proposed_by": "claude",
+            "turn_index": turn_index,
+        }
+
+        if not tool_uses:
+            if joined_text:
+                print(joined_text)
+            _log_run(args.task, joined_text)
+            record = dict(base_record)
+            record["response_chars"] = len(joined_text)
+            record["mcp_decision"] = "final-text"
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+            return 0
+
+        if len(tool_uses) > 1:
+            print(
+                f"error: turn {turn_index + 1}: Claude proposed {len(tool_uses)} tool calls; "
+                f"--mcp-agent slice 1 only allows one per turn — multi-tool-per-turn is a future slice",
+                file=sys.stderr,
+            )
+            record = dict(base_record)
+            record["mcp_decision"] = "rejected"
+            record["mcp_rejection_reason"] = "multi-tool-per-turn"
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+            return 5
+
+        tu = tool_uses[0]
+        tu_name = getattr(tu, "name", None)
+        tu_input = getattr(tu, "input", None)
+
+        if tu_name not in tool_names:
+            print(
+                f"error: turn {turn_index + 1}: Claude proposed tool {tu_name!r} which is not "
+                f"in the server's advertised tools (likely hallucination)",
+                file=sys.stderr,
+            )
+            record = dict(base_record)
+            record["mcp_decision"] = "rejected"
+            record["mcp_rejection_reason"] = "hallucinated-tool"
+            record["mcp_tool_name"] = tu_name
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+            return 5
+
+        if not isinstance(tu_input, dict):
+            print(
+                f"error: turn {turn_index + 1}: Claude's proposed tool input is not a JSON "
+                f"object (got: {type(tu_input).__name__})",
+                file=sys.stderr,
+            )
+            record = dict(base_record)
+            record["mcp_decision"] = "rejected"
+            record["mcp_rejection_reason"] = "non-dict-input"
+            record["mcp_tool_name"] = tu_name
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+            return 5
+
+        print(f"Turn {turn_index + 1}/{max_turns}", file=sys.stderr)
+        if joined_text:
+            print(f"Claude: {joined_text}")
+        print(f"Proposed MCP tool call: {tu_name}({json.dumps(tu_input)})")
+        sys.stderr.write("Run this tool? [y/N]: ")
+        sys.stderr.flush()
+        try:
+            answer = input()
+        except EOFError:
+            answer = ""
+
+        if answer.strip() not in {"y", "Y"}:
+            print(f"aborted at turn {turn_index + 1}/{max_turns}", file=sys.stderr)
+            record = dict(base_record)
+            record["mcp_decision"] = "aborted-mid-loop"
+            record["mcp_tool_name"] = tu_name
+            record["mcp_tool_args"] = tu_input
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+            return 0
+
+        try:
+            result = asyncio.run(
+                asyncio.wait_for(
+                    _async_call_tool(server_argv, tu_name, tu_input),
+                    timeout=MCP_TIMEOUT_SECONDS,
+                )
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            print(
+                f"error: MCP server did not respond within {MCP_TIMEOUT_SECONDS}s",
+                file=sys.stderr,
+            )
+            return 6
+        except Exception as exc:
+            print(f"error: MCP error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 5
+
+        is_error = bool(
+            getattr(result, "isError", None) or getattr(result, "is_error", False)
+        )
+        text = _extract_text(result)
+        if text:
+            print(text)
+
+        record = dict(base_record)
+        record["mcp_decision"] = "run"
+        record["mcp_tool_name"] = tu_name
+        record["mcp_tool_args"] = tu_input
+        record["mcp_is_error"] = is_error
+        record["response_chars"] = len(text)
+        record["claude_reasoning"] = joined_text
+        _append_history(record)
+
+        messages.append({"role": "assistant", "content": list(content)})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": getattr(tu, "id", "unknown-id"),
+                        "content": text or "(empty)",
+                        "is_error": is_error,
+                    }
+                ],
+            }
+        )
+
+    print(
+        f"error: agent loop hit max turns ({max_turns}) without a final answer",
+        file=sys.stderr,
+    )
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "task": args.task,
+        "model": args.model,
+        "response_chars": 0,
+        "mcp_proposed_by": "claude",
+        "turn_index": max_turns,
+        "mcp_decision": "max-turns-reached",
+    }
+    _append_history(record)
+    return 7
 
 
 def _run_mcp_claude(args) -> int:
@@ -713,10 +968,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         and not args.mcp_list_tools
         and args.mcp_call_tool is None
         and not args.mcp_claude
+        and not args.mcp_agent
     ):
         print(
             "error: --mcp-server is only meaningful with --mcp-list-tools, "
-            "--mcp-call-tool, or --mcp-claude",
+            "--mcp-call-tool, --mcp-claude, or --mcp-agent",
             file=sys.stderr,
         )
         return 5
@@ -731,12 +987,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: --mcp-claude requires --mcp-server", file=sys.stderr)
         return 5
 
+    if args.mcp_agent and args.mcp_server is None:
+        print("error: --mcp-agent requires --mcp-server", file=sys.stderr)
+        return 5
+    if args.mcp_agent and not (
+        1 <= args.mcp_agent_max_turns <= MAX_AGENT_TURNS_HARD_CAP
+    ):
+        print(
+            f"error: --mcp-agent-max-turns must be between 1 and {MAX_AGENT_TURNS_HARD_CAP}",
+            file=sys.stderr,
+        )
+        return 5
+    if args.mcp_agent_max_turns != DEFAULT_AGENT_TURNS and not args.mcp_agent:
+        print(
+            "error: --mcp-agent-max-turns is only meaningful with --mcp-agent",
+            file=sys.stderr,
+        )
+        return 5
+
     if args.mcp_list_tools:
         return _run_mcp_list_tools(args)
     if args.mcp_call_tool is not None:
         return _run_mcp_call_tool(args)
     if args.mcp_claude:
         return _run_mcp_claude(args)
+    if args.mcp_agent:
+        return _run_mcp_agent(args)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:

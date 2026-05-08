@@ -7,19 +7,19 @@ Add `--mcp-agent`: bounded multi-step Claude → MCP-tool loop with per-turn y/N
 GOAL.md v0.3 — "Multi-step agent loop". This slice extends `--mcp-claude` (single-shot) into a bounded loop: Claude proposes a tool → user confirms → result is fed back to Claude → Claude either stops or proposes the next tool. Hard caps + per-turn confirmation + the same hallucination/multi-tool defenses keep the loop safe. NO parallel tool calls per turn (still single-tool-per-turn — slice 2 of v0.3 could add parallel)
 
 ## Acceptance
-- [ ] `src/workbuddy/cli.py` adds two argparse args:
+- [x] `src/workbuddy/cli.py` adds two argparse args:
   - `--mcp-agent` — `action="store_true"`, default `False`. Joins the existing `mode_group` (mutex with `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`). Help: `Bounded multi-step agent loop: Claude calls tool, sees result, decides next tool. Per-turn y/N confirmation. Default 3 turns, capped at MAX_AGENT_TURNS_HARD_CAP`
   - `--mcp-agent-max-turns N` — int, default `3`. Help: `Maximum agent turns (default: 3, hard cap: 5)`
-- [ ] Module-level constants:
+- [x] Module-level constants:
   - `DEFAULT_AGENT_TURNS = 3` (low to limit blast radius for the first slice)
   - `MAX_AGENT_TURNS_HARD_CAP = 5` (no user override above this — defense-in-depth against runaway loops)
-- [ ] Validation in `main()` BEFORE the API key check:
+- [x] Validation in `main()` BEFORE the API key check:
   - If `args.mcp_agent and args.mcp_server is None` → exit 5 with stderr `error: --mcp-agent requires --mcp-server`
   - If `args.mcp_agent and (args.mcp_agent_max_turns < 1 or args.mcp_agent_max_turns > MAX_AGENT_TURNS_HARD_CAP)` → exit 5 with stderr `error: --mcp-agent-max-turns must be between 1 and {MAX_AGENT_TURNS_HARD_CAP}`
   - If `args.mcp_agent_max_turns != DEFAULT_AGENT_TURNS and not args.mcp_agent` → exit 5 with stderr `error: --mcp-agent-max-turns is only meaningful with --mcp-agent`
   - Update existing orphan-`--mcp-server` check to know about `--mcp-agent`
   - Dispatch: `if args.mcp_agent: return _run_mcp_agent(args)`
-- [ ] Add `def _run_mcp_agent(args) -> int`:
+- [x] Add `def _run_mcp_agent(args) -> int`:
   1. shlex-validate `args.mcp_server`, check `ANTHROPIC_API_KEY`, list tools (timeout 6 / error 5)
   2. Build `tools_payload` and `tool_names` (same as `_run_mcp_claude`)
   3. Initialize `messages = [{"role": "user", "content": args.task}]`
@@ -45,14 +45,14 @@ GOAL.md v0.3 — "Multi-step agent loop". This slice extends `--mcp-claude` (sin
         - `messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": getattr(tu, "id", "unknown-id"), "content": text or "(empty)", "is_error": is_error}]})`
      p. If `is_error`: continue the loop (Claude can choose to retry or give up); the `is_error` is signaled in the tool_result so Claude can react
   7. After the for-loop ends (max turns reached without a final-text exit): print stderr `error: agent loop hit max turns ({max_turns}) without a final answer`. History `{..., turn_index: max_turns, mcp_decision="max-turns-reached"}`. Return 7 (NEW exit code for "max turns hit")
-- [ ] Critical safety properties:
+- [x] Critical safety properties:
   1. Hard cap on `--mcp-agent-max-turns` enforced at validation time (cannot bypass via CLI)
   2. Per-turn y/N gate — never batch-confirm a sequence
   3. Each turn's hallucination + multi-tool + non-dict-input checks happen BEFORE that turn's prompt
   4. Aborted/cold-rejected/timeout paths all write history records for forensic readback
   5. The `messages` list grows ONLY in the run-success branch — aborted/rejected/error paths don't grow the conversation, so re-running won't replay state
-- [ ] Slice-3 cold-rejection canaries (multi-tool, hallucinated-tool, non-dict-input) MUST also fire here, just within the loop. The new tests below cover this
-- [ ] `tests/test_cli.py` adds these tests using a new `_ScriptedAnthropicMessages` helper that returns pre-built responses per call (one per turn):
+- [x] Slice-3 cold-rejection canaries (multi-tool, hallucinated-tool, non-dict-input) MUST also fire here, just within the loop. The new tests below cover this
+- [x] `tests/test_cli.py` adds these tests using a new `_ScriptedAnthropicMessages` helper that returns pre-built responses per call (one per turn):
   - `test_mcp_agent_two_turns_then_final` — turn 1: tool_use(`echo`, `{"x":1}`); tool returns "result1". Turn 2: text-only "all done". Input "y" twice. Assert main returns 0, stdout has "Turn 1/3", "result1", "all done", history has 2 rows (turn=0 run, turn=1 final-text), the recorded `messages` after turn 1 has 3 entries (initial user, assistant turn 1, user tool_result)
   - `test_mcp_agent_user_aborts_mid_loop` — turn 1: tool_use. Input "n". Tool MUST NOT be called. Returns 0, stderr `aborted at turn 1`, history row `mcp_decision="aborted-mid-loop"`. The scripted Anthropic should NOT have been called twice (we abort before turn 2)
   - `test_mcp_agent_max_turns_reached` — every turn returns a tool_use (no terminal text-only response). Set `--mcp-agent-max-turns 2`. Input "y" twice. Returns 7, stderr `hit max turns (2)`, history has 3 rows (2 runs + 1 max-turns-reached)
@@ -64,11 +64,11 @@ GOAL.md v0.3 — "Multi-step agent loop". This slice extends `--mcp-claude` (sin
   - `test_mcp_agent_requires_mcp_server` — `--mcp-agent task`. Returns 5
   - `test_mcp_agent_mutually_exclusive_with_other_modes` — verify SystemExit on `--mcp-agent` paired with each of `--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`
   - `test_mcp_agent_text_only_first_response_is_final` — turn 1 returns text only, no tool_use. Input must-not-be-called (no prompt should appear). Returns 0. stdout has the text. History has one row `mcp_decision="final-text"`. The model was only called once
-- [ ] All 80 existing tests must continue to pass unchanged
-- [ ] `python -m pytest -W error` passes
-- [ ] `README.md` "Usage" section gains a `--mcp-agent` paragraph after `--mcp-claude`. Example: `workbuddy --mcp-agent --mcp-server "..." "find the file with the largest line count and read its first 5 lines"`. Note the per-turn confirmation, hard cap of 5 turns, that you can abort at any turn with `n`, and that this is single-tool-per-turn (parallel calls deferred)
-- [ ] BACKLOG: change `[ ] Multi-step agent loop: ...` to `[⏳] Multi-step agent loop *(slice 1: --mcp-agent with hard cap, per-turn y/N, single-tool-per-turn; parallel tool calls and self-reflection deferred)*`
-- [ ] Total project Python LOC stays under ~2900
+- [x] All 80 existing tests must continue to pass unchanged
+- [x] `python -m pytest -W error` passes
+- [x] `README.md` "Usage" section gains a `--mcp-agent` paragraph after `--mcp-claude`. Example: `workbuddy --mcp-agent --mcp-server "..." "find the file with the largest line count and read its first 5 lines"`. Note the per-turn confirmation, hard cap of 5 turns, that you can abort at any turn with `n`, and that this is single-tool-per-turn (parallel calls deferred)
+- [x] BACKLOG: change `[ ] Multi-step agent loop: ...` to `[⏳] Multi-step agent loop *(slice 1: --mcp-agent with hard cap, per-turn y/N, single-tool-per-turn; parallel tool calls and self-reflection deferred)*`
+- [x] Total project Python LOC stays under ~2900
 
 ## Files likely involved
 - src/workbuddy/cli.py

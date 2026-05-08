@@ -22,4 +22,4 @@
 - [x] MCP integration *(--mcp-list-tools, --mcp-call-tool, and --mcp-claude shipped; agent loop / multi-step deferred to v0.3)*
 
 ## v0.3 (post-MCP)
-- [ ] Multi-step agent loop: Claude calls tool, sees result, decides next tool — with per-call y/N gates
+- [⏳] Multi-step agent loop: Claude calls tool, sees result, decides next tool — with per-call y/N gates *(slice 1: `--mcp-agent` with hard cap, per-turn y/N, single-tool-per-turn; parallel tool calls and self-reflection deferred)*

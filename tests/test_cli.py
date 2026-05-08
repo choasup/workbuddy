@@ -808,6 +808,280 @@ def test_mcp_call_tool_history_now_has_proposed_by_user(tmp_path, monkeypatch):
     assert rows[0]["mcp_proposed_by"] == "user"
 
 
+class _ScriptedMessages:
+    """Stub that returns pre-built responses per call to .create()."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.create_calls = []
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        if not self._responses:
+            raise AssertionError("ran out of scripted responses")
+        return self._responses.pop(0)
+
+
+def _make_scripted_anthropic(responses):
+    scripted = _ScriptedMessages(responses)
+
+    class _ScriptedClient:
+        def __init__(self, **kwargs):
+            self.messages = scripted
+
+    return _ScriptedClient, scripted
+
+
+def _agent_tool_use_response(name: str, input_dict: dict, tu_id: str = "tu_1"):
+    return types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(
+                type="tool_use", name=name, input=input_dict, id=tu_id
+            )
+        ]
+    )
+
+
+def _agent_text_response(text: str):
+    return types.SimpleNamespace(content=[_text_block(text)])
+
+
+async def _async_call_tool_returning(text: str, is_error: bool = False):
+    async def _fake(server_argv, tool_name, tool_args):
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(text=text)], isError=is_error
+        )
+
+    return _fake
+
+
+def _setup_agent_test(monkeypatch, server_tools_names, anthropic_responses, call_tool_text="result"):
+    server_tools = [
+        types.SimpleNamespace(name=n, description="", inputSchema={})
+        for n in server_tools_names
+    ]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    async def _fake_call(server_argv, tool_name, tool_args):
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(text=call_tool_text)], isError=False
+        )
+
+    AnthropicCls, scripted = _make_scripted_anthropic(anthropic_responses)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_call)
+    return scripted
+
+
+def test_mcp_agent_two_turns_then_final(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}),
+            _agent_text_response("all done"),
+        ],
+        call_tool_text="result1",
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Turn 1/3" in captured.err
+    assert "result1" in captured.out
+    assert "all done" in captured.out
+    assert len(scripted.create_calls) == 2
+    # Turn 2's messages list should have grown to include the assistant turn + tool_result
+    turn2_messages = scripted.create_calls[1]["messages"]
+    assert len(turn2_messages) == 3
+    assert turn2_messages[1]["role"] == "assistant"
+    assert turn2_messages[2]["role"] == "user"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 2
+    assert rows[0]["mcp_decision"] == "run"
+    assert rows[0]["turn_index"] == 0
+    assert rows[1]["mcp_decision"] == "final-text"
+    assert rows[1]["turn_index"] == 1
+
+
+def test_mcp_agent_user_aborts_mid_loop(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}),
+            _agent_text_response("not reached"),
+        ],
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "aborted at turn 1" in captured.err
+    # Only first response was consumed
+    assert len(scripted.create_calls) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["mcp_decision"] == "aborted-mid-loop"
+
+
+def test_mcp_agent_max_turns_reached(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="tu_1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="tu_2"),
+        ],
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-max-turns", "2", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 7
+    captured = capsys.readouterr()
+    assert "hit max turns (2)" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 3
+    assert rows[0]["mcp_decision"] == "run"
+    assert rows[1]["mcp_decision"] == "run"
+    assert rows[2]["mcp_decision"] == "max-turns-reached"
+    assert rows[2]["turn_index"] == 2
+
+
+def test_mcp_agent_max_turns_above_hard_cap_rejected(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-max-turns", "99", "--mcp-server", "fake", "task"]
+    )
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "must be between 1 and 5" in captured.err
+
+
+def test_mcp_agent_max_turns_zero_rejected(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-max-turns", "0", "--mcp-server", "fake", "task"]
+    )
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "must be between 1 and 5" in captured.err
+
+
+def test_mcp_agent_max_turns_alone_rejected(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rc = main(["--mcp-agent-max-turns", "2", "task"])
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "only meaningful with --mcp-agent" in captured.err
+
+
+def test_mcp_agent_multi_tool_per_turn_cold_rejected(tmp_path, monkeypatch, capsys):
+    multi = types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(type="tool_use", name="echo", input={"x": 1}, id="t1"),
+            types.SimpleNamespace(type="tool_use", name="echo", input={"x": 2}, id="t2"),
+        ]
+    )
+    _setup_agent_test(monkeypatch, ["echo"], [multi])
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "multi-tool" in captured.err.lower() or "2 tool calls" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_rejection_reason"] == "multi-tool-per-turn"
+
+
+def test_mcp_agent_hallucinated_tool_cold_rejected(tmp_path, monkeypatch, capsys):
+    _setup_agent_test(
+        monkeypatch, ["echo"], [_agent_tool_use_response("rm", {"path": "/"})]
+    )
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "hallucination" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_rejection_reason"] == "hallucinated-tool"
+
+
+def test_mcp_agent_requires_mcp_server(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rc = main(["--mcp-agent", "task"])
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "requires --mcp-server" in captured.err
+
+
+def test_mcp_agent_mutually_exclusive_with_other_modes(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    for other_args in (
+        ["--exec"],
+        ["--git"],
+        ["--mcp-list-tools"],
+        ["--mcp-call-tool", "x"],
+        ["--mcp-claude"],
+    ):
+        with pytest.raises(SystemExit):
+            main(["--mcp-agent", *other_args, "task"])
+
+
+def test_mcp_agent_text_only_first_response_is_final(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_test(
+        monkeypatch, ["echo"], [_agent_text_response("immediate answer")]
+    )
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+
+    rc = main(["--mcp-agent", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "immediate answer" in captured.out
+    assert len(scripted.create_calls) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["mcp_decision"] == "final-text"
+    assert rows[0]["turn_index"] == 0
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
