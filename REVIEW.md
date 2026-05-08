@@ -1,21 +1,17 @@
-# Review of 752f277
+# Review of 49429dd
 
 ## Verdict
 PASS
 
 ## Findings
-- All 9 acceptance criteria met. `pytest -q` → 16 passed independently with no env vars set.
-- The 4 `_extract_text` tests cover all the gaps in REVIEW: concatenated multi-block, blocks missing `.text` (one without the attribute, one with `.text is None`), empty `content` list, and `content=None`. `getattr(block, "text", None)` and `getattr(response, "content", []) or []` are both exercised.
-- `test_log_run_truncates_long_response` is robustly written: it uses a 100-char tail marker and asserts the marker is NOT in the file, plus that `... [truncated]` IS present. This avoids hard-coding the exact slice arithmetic, so the test won't break if the truncation suffix is tweaked later.
-- `test_log_run_creates_nested_directories` correctly sets `WORKBUDDY_HOME` to a 3-deep path that doesn't exist; the autouse `_isolate_workbuddy_home` fixture is correctly overridden by the per-test `monkeypatch.setenv` (later setenv wins).
-- `test_log_run_handles_oserror_without_raising` uses a regular file at the `WORKBUDDY_HOME` path so `Path.parent.mkdir(parents=True, exist_ok=True)` raises `FileExistsError` (subclass of `OSError`). Assertions check `_log_run` returns `None`, stderr contains `warning`, and (implicitly) does not raise. Clean reproduction of the production failure mode.
-- `_resp(*texts)` helper is a small DRY win.
-- Imports are surgical: only the three internal symbols actually exercised (`_extract_text`, `_log_run`, `MAX_LOGGED_RESPONSE_CHARS`); no module-level reach-around.
-- All 9 existing tests preserved unchanged — verified by diff.
-- No production-code changes; CODER's LOG entry confirms no real bugs were uncovered. The helpers behaved as designed.
-- LOC = 330 total; 500-LOC v0 ceiling intact.
+- All 7 acceptance criteria met. `pytest -q` → 16 passed independently with no env vars.
+- `LICENSE` is the standard 21-line MIT License text with `Copyright (c) 2026 workbuddy contributors`. Holder string deliberately matches `pyproject.toml`'s `authors = [{ name = "workbuddy" }]` — no individual is named, which is the right call when the human owner has not been declared in-repo. The reviewer recommended in the prior round that this string be free for the human to overwrite later if desired; the choice here preserves that option without misattribution.
+- `pyproject.toml` gains `[project.optional-dependencies] dev = ["pytest>=7"]` and nothing else changed. Verified `pip install -e ".[dev]"` resolves (Coder confirmed in LOG.md).
+- `README.md` "Status" line updated cleanly: `Pre-v0` no longer appears anywhere in the README (`grep` returns no match), and the new line correctly points readers to `BACKLOG.md` for v0.1+ work.
+- No code under `src/` touched. No existing tests touched. Diff is purely additive (LICENSE, one toml table) plus one one-line `Status` text edit. Total Python LOC unchanged at 330.
+- `chore:` commit prefix is appropriate for this round (no behavioural change).
 
 ## Suggestions for next round
-- **v0 is feature-complete.** All 8 backlog v0 entries are now `[x]`. Planner should now schedule the closing chore: bump README "Status" line from `Pre-v0` to `v0 — feature complete`, add a `LICENSE` file (MIT — `pyproject.toml` already declares it), declare `[project.optional-dependencies] dev = ["pytest"]`, and (optional) tag `v0.0.1`. This is naturally bundleable as one `chore:` round.
-- After that, BACKLOG's v0.1 line items can begin: persistent local state under `~/.workbuddy/`, shell execution mode with confirmation prompt, and git operations helper. Planner should pick one to scope first.
-- Consider freezing the autobuddy 1-min cron once the chore lands and v0.1 is human-scoped, since v0 was the explicit goal of this round of automation.
+- BACKLOG `v0 polish` item can now be marked `[x]`. With v0 + polish both shipped, the natural next pick is the first v0.1 item: **persistent local state (config, history) under `~/.workbuddy/`**. Tight scope: a `~/.workbuddy/config.toml` (or json) for `default_model` override, optionally a single `history.jsonl` next to `log.md` recording structured `{ts, task, model, response}` rows so future commands can read prior runs. Planner should pick ONE of {config file, history jsonl} — bundling both is too large for one Coder run.
+- A v0 release tag (`v0.0.1`) is intentionally NOT included here: tag/release decisions are human-authored. If/when the human owner wants to cut one, they can `git tag -a v0.0.1 -m "v0 — feature complete"` against this commit.
+- Consider stopping the 1-min cron once Planner has scoped the v0.1 task. v0 was the explicit goal of the autobuddy session; further automation past v0 should be a deliberate human decision, not a default.
