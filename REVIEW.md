@@ -1,25 +1,35 @@
-# Review of 729a26f
+# Review of 40ea144
 
 ## Verdict
 PASS
 
+## Safety property check (the critical one)
+- Independently verified `shlex.split` behaviour on three classic injection attempts:
+  - `"echo a ; rm -rf /tmp/should-not-exist"` → `['echo', 'a', ';', 'rm', '-rf', '/tmp/should-not-exist']`
+  - `"echo $(rm -rf /)"` → `['echo', '$(rm', '-rf', '/)']`
+  - `"rm -rf / | tee log"` → `['rm', '-rf', '/', '|', 'tee', 'log']`
+  In all three, metacharacters become literal arg strings. Combined with `subprocess.run(..., shell=False, check=False)`, no shell is invoked, so command substitution / pipes / sequencing are NOT possible. The safety property holds.
+- The `test_exec_shell_metacharacters_are_not_expanded` canary asserts both the parsed argv and `shell=False` — losing either would break the property and the canary catches that.
+- The y/N gate is strict: `answer.strip() not in {"y", "Y"}` aborts. `EOFError` and empty input both produce `answer == ""` → abort. `yes`/`Yes`/anything-else also abort. Default-no is enforced.
+
 ## Findings
-- All 11 acceptance criteria met. `pytest -q` → 24 passed independently with no env vars.
-- `MAX_HISTORY_ROWS = 1000` is a named module constant, exported, and used in the test via `from workbuddy.cli import MAX_HISTORY_ROWS` — the test will follow the constant if it ever changes.
-- `_append_history` schema is the minimal-but-useful set the spec asked for: `{ts, task, model, response_chars}`. No full response body in history (correct — `log.md` already owns that, and history exists to be scannable).
-- Rotation logic is correct: append-then-truncate with a `len(lines) > MAX_HISTORY_ROWS` guard. The seeded test (1000 pre-existing rows + 1 append → 1000 retained, last row is the new one) verifies both the count and the LIFO behaviour. Edge case at exactly `MAX_HISTORY_ROWS` lines: `>` (not `>=`), so the file isn't rewritten when at the boundary — minor I/O save.
-- `OSError` wrapped around the whole helper (parallel to `_log_run`), so a permission/disk error degrades to a stderr `warning:` rather than crashing the CLI. The rotation rewrite is inside the try block, so a failure mid-rotate (very unlikely) is also caught.
-- `_history_path()` reuses `_log_path().parent` — single source of truth for the workbuddy dir, honors `WORKBUDDY_HOME`.
-- Config softening (`if "default_model" not in data: return DEFAULT_MODEL`) is the minimum-invasive change for forward-compat. Wrong-type still warns; invalid JSON still warns; `test_main_malformed_config_falls_back_and_warns` (existing) was not affected because it uses the invalid-JSON path. The new `test_config_silent_when_default_model_absent` asserts `captured.err == ""`, which is the right assertion for "no warning".
-- API-error path correctly skips both `_log_run` AND `_append_history` — verified by `test_api_error_does_not_create_history`.
-- README paragraph is terse and accurate; precedence/format/rotation in one short paragraph.
-- All 19 prior tests pass unchanged — verified by pytest output.
-- LOC = 522 — over the former v0 500 ceiling, but the planner explicitly relaxed that for v0.1 (target <600), and this is well within. No bloat.
-- Minor non-blocking notes for future rounds:
-  - Two-pass rotation (append, then read-all, then maybe rewrite) does linear I/O on every call. Fine at 1000 rows; not fine if someone bumps `MAX_HISTORY_ROWS` to 1M. A bounded ring-buffer or "rotate every Nth call" optimization can wait.
-  - `json.dumps` could raise `TypeError` on un-serializable record fields. Not reachable today (record is all str/int), but worth keeping in mind if a future field carries e.g. a `Path` or `datetime` object.
+- All 11 acceptance criteria met. `pytest -q` → 33 passed independently with no env vars and no real subprocess invocation.
+- `--exec` argparse flag is `action="store_true"`; `args.exec` reads cleanly even though `exec` was a Python 2 keyword (it's a normal builtin name in 3.x). No conflict.
+- Message-content rewrite (`Reply with exactly ONE POSIX shell command...`) only fires when `--exec` is set; non-exec invocations are byte-identical to the prior round, which is why all 24 prior tests pass unchanged.
+- `_run_exec` flow is linear and easy to audit: validate → prompt → input → branch on `{"y","Y"}` → record-and-return. No cleverness, which is exactly what you want in a code path that can run arbitrary commands.
+- `print("Proposed command: ...")` to stdout, `Run this command? [y/N]: ` to stderr — correct separation. Stdout pipes (e.g. `workbuddy --exec "..." | grep`) won't pollute the prompt; the prompt stays visible on the terminal.
+- `subprocess.run` invocation does not pass `capture_output=True`, so the user sees the executed command's output on their own stdout/stderr. Exit code propagates back to the CLI's exit code. No timeout means a hung subprocess holds the CLI forever — acceptable for slice 1 (Ctrl+C reaches the child); future polish.
+- History records carry the new `exec_command` / `exec_decision` / `exec_exit` keys per spec; aborted runs explicitly omit `exec_exit` and the test asserts that. The stand `_log_run` is intentionally NOT called for exec runs (per spec).
+- `_SubprocessRecorder` is the right test pattern — replaces only `cli_mod.subprocess.run`, leaves the module otherwise intact, and asserts on the captured args. Tests never touch the real OS.
+- LOC = 748, slightly over the planner's `~700` soft target. Bulk is the new test suite (~150 LOC); trimming would cost clarity and the planner explicitly said "don't pad" rather than "don't exceed". Acceptable.
+- Carry-over notes (non-blocking, candidates for future polish):
+  - **Markdown-wrapped responses**: if the model returns ` ```bash\necho hello\n``` ` (despite the prompt asking for no fences), `shlex.split` produces argv starting with ` ```bash `, which `subprocess.run` will surface as `FileNotFoundError`. That exception is not caught by `_run_exec` and would propagate as an ugly traceback. No security implication (no command runs), but bad UX.
+  - **Long-running/interactive commands**: subprocess inherits the parent terminal, so `vim`, `less`, etc. would commandeer it. Expected for an exec UX, but worth a doc line.
+  - **No timeout**: a hung child holds the CLI. Slice 2 candidate.
+  - **No log.md entry for exec runs**: spec said "slice 2 can revisit" — leaving as-is.
 
 ## Suggestions for next round
-- The full BACKLOG "Persistent local state (config, history) under `~/.workbuddy/`" line is now done — both config.json and history.jsonl shipped. Planner should mark it `[x]` (drop the `[⏳]` annotation) when scheduling next.
-- v0.1 has 2 items left: **Shell execution mode with confirmation prompt** and **Git operations helper**. The shell execution feature is security-sensitive (the agent can ask for arbitrary commands; we MUST gate on a y/n confirmation, MUST default to "no", and MUST NOT auto-run anything). This is a good moment to **pause the autobuddy 1-min cron** and let the human steer scope. The autobuddy cron has carried the project from bootstrap → v0 + polish → v0.1 persistent state across ~30 successful rounds; the remaining v0.1 work has design choices (which commands to whitelist? confirm prompt UX?) that benefit from human input.
-- If the human chooses to keep the cron running, Planner should pick "Shell execution mode" next with a tightly scoped first slice: just a `--exec` flag that, when paired with a task, asks Claude to produce a single shell command, prints it to the user, asks for `y/N` confirmation on stdin, and only on `y` runs it via `subprocess.run(..., shell=False, ...)` after `shlex.split` parsing. No expansion, no streaming, no pipes — just one command.
+- The BACKLOG "Shell execution mode with confirmation prompt" line is functionally satisfied by slice 1 — the feature works end-to-end with strong safety properties. Mark it `[x]`.
+- A second slice could be scoped as **shell-exec polish**: catch `FileNotFoundError` / `PermissionError` from `subprocess.run` and surface as `error: cannot execute "<argv0>": ...` (exit 4); strip markdown fences from the model response before `shlex.split`; optional `--exec-timeout SECONDS` flag wiring `subprocess.run(..., timeout=...)`. None are blocking.
+- v0.1 last item: **Git operations helper**. This needs design — read-only (`git status` / `git log` only) versus read-write (`git commit` / `git push`)? Confirmation flow if write? Suggest tightly scoping to **read-only** in slice 1 (status, log, branch, diff) and deferring write operations to a slice 2 with explicit `--allow-write` opt-in. Strongly recommend a human design pass before automating it — git operations on the user's repos can't be undone with `git reflog` if pushed.
+- Same standing recommendation: this is a good moment to pause the 1-min cron. The shell-exec feature is the riskiest piece of v0.1; landing it clean is a natural checkpoint.

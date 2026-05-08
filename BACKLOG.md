@@ -15,7 +15,7 @@
 
 ## v0.1
 - [x] Persistent local state (config, history) under `~/.workbuddy/` *(config.json `default_model` + history.jsonl with rotation)*
-- [⏳] Shell execution mode with confirmation prompt *(slice 1: --exec flag, single command, shell=False, default-no y/N confirm)*
+- [x] Shell execution mode with confirmation prompt *(`--exec` flag; single command via `shlex.split`; `shell=False`; default-no y/N confirm; exec_* fields in history)*
 - [ ] Git operations helper
 
 ## v0.2
