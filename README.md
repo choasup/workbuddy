@@ -29,6 +29,14 @@ workbuddy --model claude-opus-4-7 "write a haiku about caching"
 
 To persist a preferred default without typing `--model` every time, create `~/.workbuddy/config.json` with shape `{"default_model": "claude-opus-4-7"}`. An explicit `--model` flag still wins.
 
+Pass `--exec` to ask Claude for a single shell command and run it after explicit confirmation:
+
+```bash
+workbuddy --exec "list git branches sorted by commit date"
+```
+
+Each proposed command is shown for explicit `y/N` confirmation. Commands run with `shell=False` and arguments parsed via `shlex.split`, so shell metacharacters in the proposed command (`;`, `|`, `&&`, `>`, `$(...)`, backticks, etc.) are not expanded. The default answer is no — empty input or EOF aborts.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.

@@ -257,6 +257,169 @@ def test_main_missing_argument_exits_nonzero(capsys):
     assert captured.err
 
 
+def _make_stub_client_returning(text: str):
+    class _C:
+        last_messages = None
+
+        def __init__(self, **kwargs):
+            self.messages = _StubMessages(text)
+            type(self).last_messages = self.messages
+
+    return _C
+
+
+class _SubprocessRecorder:
+    def __init__(self, returncode: int = 0):
+        self.calls: list[dict] = []
+        self.returncode = returncode
+
+    def run(self, *args, **kwargs):
+        self.calls.append({"args": args, "kwargs": kwargs})
+        return types.SimpleNamespace(returncode=self.returncode)
+
+
+def _install_subprocess_recorder(monkeypatch, recorder: _SubprocessRecorder) -> None:
+    monkeypatch.setattr(cli_mod.subprocess, "run", recorder.run)
+
+
+def test_exec_runs_after_yes(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hello"))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+    recorder = _SubprocessRecorder(returncode=0)
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["args"][0] == ["echo", "hello"]
+    assert call["kwargs"].get("shell") is False
+
+
+def test_exec_aborts_on_n(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hello"))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+    recorder = _SubprocessRecorder()
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    assert recorder.calls == []
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+
+
+def test_exec_aborts_on_empty_input(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hello"))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    recorder = _SubprocessRecorder()
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    assert recorder.calls == []
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+
+
+def test_exec_aborts_on_eof(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hello"))
+
+    def _raises_eof(*a, **k):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raises_eof)
+    recorder = _SubprocessRecorder()
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("model_text", ["", "   "])
+def test_exec_empty_model_response_errors(tmp_path, monkeypatch, capsys, model_text):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning(model_text))
+    recorder = _SubprocessRecorder()
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 3
+    assert recorder.calls == []
+    captured = capsys.readouterr()
+    assert "no command" in captured.err
+
+
+def test_exec_shell_metacharacters_are_not_expanded(tmp_path, monkeypatch):
+    """Safety canary — do NOT delete casually. Asserts shell=False + literal-arg parsing."""
+    dangerous = "echo a ; rm -rf /tmp/should-not-exist"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning(dangerous))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+    recorder = _SubprocessRecorder(returncode=0)
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["args"][0] == ["echo", "a", ";", "rm", "-rf", "/tmp/should-not-exist"]
+    assert call["kwargs"].get("shell") is False
+
+
+def test_exec_history_records_run_decision_and_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hi"))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+    recorder = _SubprocessRecorder(returncode=7)
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 7
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["exec_command"] == "echo hi"
+    assert row["exec_decision"] == "run"
+    assert row["exec_exit"] == 7
+
+
+def test_exec_aborted_history_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _make_stub_client_returning("echo hi"))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+    recorder = _SubprocessRecorder()
+    _install_subprocess_recorder(monkeypatch, recorder)
+
+    rc = main(["--exec", "task"])
+
+    assert rc == 0
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["exec_command"] == "echo hi"
+    assert row["exec_decision"] == "aborted"
+    assert "exec_exit" not in row
+
+
 def _resp(*texts):
     blocks = [types.SimpleNamespace(text=t) for t in texts]
     return types.SimpleNamespace(content=blocks)

@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         default=effective_default,
         help=f"Claude model id (default: {effective_default})",
+    )
+    parser.add_argument(
+        "--exec",
+        action="store_true",
+        default=False,
+        help="Ask Claude for a single shell command and execute it after y/N confirmation",
     )
     return parser
 
@@ -115,6 +123,49 @@ def _log_run(task: str, response_text: str) -> None:
         print(f"warning: failed to append run to log: {exc}", file=sys.stderr)
 
 
+def _run_exec(args, text: str) -> int:
+    command_text = text.strip()
+    if not command_text:
+        print("error: model returned no command", file=sys.stderr)
+        return 3
+    try:
+        argv_list = shlex.split(command_text)
+    except ValueError as exc:
+        print(f"error: model returned no command: {exc}", file=sys.stderr)
+        return 3
+    if not argv_list:
+        print("error: model returned no command", file=sys.stderr)
+        return 3
+
+    print(f"Proposed command: {command_text}")
+    sys.stderr.write("Run this command? [y/N]: ")
+    sys.stderr.flush()
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "task": args.task,
+        "model": args.model,
+        "response_chars": len(text),
+        "exec_command": command_text,
+    }
+
+    if answer.strip() not in {"y", "Y"}:
+        print("aborted", file=sys.stderr)
+        record["exec_decision"] = "aborted"
+        _append_history(record)
+        return 0
+
+    result = subprocess.run(argv_list, shell=False, check=False)
+    record["exec_decision"] = "run"
+    record["exec_exit"] = result.returncode
+    _append_history(record)
+    return result.returncode
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -127,12 +178,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
+    if args.exec:
+        user_content = (
+            f"Reply with exactly ONE POSIX shell command. "
+            f"No commentary, no markdown, no fences. Task: {args.task}"
+        )
+    else:
+        user_content = args.task
+
     client = Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
     try:
         response = client.messages.create(
             model=args.model,
             max_tokens=MAX_TOKENS,
-            messages=[{"role": "user", "content": args.task}],
+            messages=[{"role": "user", "content": user_content}],
         )
     except APIError as exc:
         print(
@@ -141,6 +200,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     text = _extract_text(response)
+
+    if args.exec:
+        return _run_exec(args, text)
+
     print(text)
     _log_run(args.task, text)
     _append_history(
