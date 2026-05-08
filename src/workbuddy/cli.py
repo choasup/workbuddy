@@ -187,6 +187,20 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _confirm_yn(prompt: str) -> bool:
+    """Write `prompt` to stderr, read one line of input, return True only for 'y'/'Y'.
+
+    EOFError and any other input return False — strict default-no contract.
+    """
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+    return answer.strip() in {"y", "Y"}
+
+
 def _extract_text(response) -> str:
     parts = []
     for block in getattr(response, "content", []) or []:
@@ -549,14 +563,7 @@ def _run_mcp_agent(args) -> int:
         if joined_text:
             print(f"Claude: {joined_text}")
         print(f"Proposed MCP tool call: {tu_name}({json.dumps(tu_input)})")
-        sys.stderr.write("Run this tool? [y/N]: ")
-        sys.stderr.flush()
-        try:
-            answer = input()
-        except EOFError:
-            answer = ""
-
-        if answer.strip() not in {"y", "Y"}:
+        if not _confirm_yn("Run this tool? [y/N]: "):
             print(f"aborted at turn {turn_index + 1}/{max_turns}", file=sys.stderr)
             record = dict(base_record)
             record["mcp_decision"] = "aborted-mid-loop"
@@ -801,19 +808,14 @@ def _run_mcp_claude(args) -> int:
     if joined_text:
         print(f"Claude: {joined_text}")
     print(f"Proposed MCP tool call: {tu_name}({json.dumps(tu_input)})")
-    sys.stderr.write("Run this tool? [y/N]: ")
-    sys.stderr.flush()
-    try:
-        answer = input()
-    except EOFError:
-        answer = ""
+    confirmed = _confirm_yn("Run this tool? [y/N]: ")
 
     record = dict(base_record)
     record["mcp_tool_name"] = tu_name
     record["mcp_tool_args"] = tu_input
     record["claude_reasoning"] = joined_text
 
-    if answer.strip() not in {"y", "Y"}:
+    if not confirmed:
         print("aborted", file=sys.stderr)
         record["mcp_decision"] = "aborted"
         _append_history(record)
@@ -886,12 +888,7 @@ def _run_mcp_call_tool(args) -> int:
     tool_name = args.mcp_call_tool
     proposed_payload = json.dumps(tool_args)
     print(f"Proposed MCP tool call: {tool_name}({proposed_payload})")
-    sys.stderr.write("Run this tool? [y/N]: ")
-    sys.stderr.flush()
-    try:
-        answer = input()
-    except EOFError:
-        answer = ""
+    confirmed = _confirm_yn("Run this tool? [y/N]: ")
 
     record = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -903,7 +900,7 @@ def _run_mcp_call_tool(args) -> int:
         "mcp_proposed_by": "user",
     }
 
-    if answer.strip() not in {"y", "Y"}:
+    if not confirmed:
         print("aborted", file=sys.stderr)
         record["mcp_decision"] = "aborted"
         _append_history(record)
@@ -1037,14 +1034,7 @@ def _run_git(args, text: str) -> int:
         return 4
 
     print(f"Proposed command: {command_text}")
-    sys.stderr.write("Run this command? [y/N]: ")
-    sys.stderr.flush()
-    try:
-        answer = input()
-    except EOFError:
-        answer = ""
-
-    if answer.strip() not in {"y", "Y"}:
+    if not _confirm_yn("Run this command? [y/N]: "):
         print("aborted", file=sys.stderr)
         record["git_decision"] = "aborted"
         _append_history(record)
@@ -1072,12 +1062,7 @@ def _run_exec(args, text: str) -> int:
         return 3
 
     print(f"Proposed command: {command_text}")
-    sys.stderr.write("Run this command? [y/N]: ")
-    sys.stderr.flush()
-    try:
-        answer = input()
-    except EOFError:
-        answer = ""
+    confirmed = _confirm_yn("Run this command? [y/N]: ")
 
     record = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1087,7 +1072,7 @@ def _run_exec(args, text: str) -> int:
         "exec_command": command_text,
     }
 
-    if answer.strip() not in {"y", "Y"}:
+    if not confirmed:
         print("aborted", file=sys.stderr)
         record["exec_decision"] = "aborted"
         _append_history(record)

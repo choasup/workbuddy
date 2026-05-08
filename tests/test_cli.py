@@ -1698,6 +1698,32 @@ def test_version_does_not_require_api_key(monkeypatch, capsys):
     assert ei.value.code == 0
 
 
+@pytest.mark.parametrize(
+    "user_input, expected",
+    [
+        ("y", True),
+        ("Y", True),
+        ("  y  ", True),
+        ("Y\n", True),
+        ("n", False),
+        ("no", False),
+        ("yes", False),
+        ("", False),
+    ],
+)
+def test_confirm_yn_strict_default_no(monkeypatch, user_input, expected):
+    monkeypatch.setattr("builtins.input", lambda *a, **k: user_input)
+    assert cli_mod._confirm_yn("?: ") is expected
+
+
+def test_confirm_yn_eof_returns_false(monkeypatch):
+    def _raises_eof(*a, **k):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raises_eof)
+    assert cli_mod._confirm_yn("?: ") is False
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
