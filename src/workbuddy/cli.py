@@ -21,13 +21,11 @@ READONLY_GIT_SUBCMDS = frozenset(
         "status",
         "log",
         "diff",
-        "branch",
         "show",
         "blame",
         "rev-parse",
         "ls-files",
         "describe",
-        "reflog",
         "shortlog",
         "name-rev",
     }
@@ -321,8 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         user_content = (
             "Reply with exactly ONE git read-only command. "
             "No commentary, no markdown, no fences. "
-            "Allowed subcommands: status, log, diff, branch, show, blame, "
-            "rev-parse, ls-files, describe, reflog, shortlog, name-rev. "
+            "Allowed subcommands: status, log, diff, show, blame, "
+            "rev-parse, ls-files, describe, shortlog, name-rev. "
             "Repository context follows.\n\n"
             f"{git_context}\n\n"
             f"Task: {args.task}"

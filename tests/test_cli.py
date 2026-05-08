@@ -549,6 +549,99 @@ def test_git_rejection_writes_history_record(tmp_path, monkeypatch):
     assert "commit" in rows[0]["git_rejection_reason"]
 
 
+def test_git_branch_d_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git branch -d feature", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `branch`" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["git_decision"] == "rejected"
+
+
+def test_git_branch_D_force_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git branch -D feature", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `branch`" in captured.err
+
+
+def test_git_branch_m_rename_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git branch -m oldname newname", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `branch`" in captured.err
+
+
+def test_git_branch_list_is_now_cold_rejected(tmp_path, monkeypatch, capsys):
+    """Strategy-A trade-off: read-only `git branch` (plain listing) is no longer reachable
+    via --git, because `branch` was dropped from the allowlist to block its write variants
+    (-d/-D/-m/-c). Users wanting a read-only branch listing should fall back to --exec.
+    Do NOT 'fix' this rejection by re-adding `branch` to the allowlist without also
+    adding flag-level write rejection."""
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git branch", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `branch`" in captured.err
+
+
+def test_git_reflog_expire_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git reflog expire --expire=0 --all", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `reflog`" in captured.err
+
+
+def test_git_reflog_show_is_now_cold_rejected(tmp_path, monkeypatch, capsys):
+    """Strategy-A trade-off: read-only `git reflog show` is no longer reachable via --git,
+    because `reflog` was dropped from the allowlist to block its write variants
+    (`reflog expire`, `reflog delete`). Users wanting reflog inspection should fall back
+    to --exec. Do NOT 'fix' this rejection by re-adding `reflog` to the allowlist without
+    also adding subcommand-level write rejection."""
+    recorder = _SubprocessRecorder(returncode=0)
+    _setup_git_test(monkeypatch, "git reflog show HEAD", recorder)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--git", "task"])
+
+    assert rc == 4
+    assert len(recorder.calls) == _GIT_CONTEXT_CALL_COUNT
+    captured = capsys.readouterr()
+    assert "rejects subcommand `reflog`" in captured.err
+
+
 def test_git_context_failure_warns_and_continues(tmp_path, monkeypatch, capsys):
     """If the branch query fails (not a git repo), warn and still proceed to API."""
     recorder = _SubprocessRecorder(returncode=128, stdout="", stderr="not a git repo")

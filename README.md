@@ -43,7 +43,7 @@ Pass `--git` for a read-only git helper that auto-loads `git status`, the curren
 workbuddy --git "what changed on this branch since main"
 ```
 
-`--git` enforces a read-only subcommand allowlist (`status`, `log`, `diff`, `branch`, `show`, `blame`, `rev-parse`, `ls-files`, `describe`, `reflog`, `shortlog`, `name-rev`). Write subcommands like `commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `clean`, etc. are rejected before the confirmation prompt is even shown — an accidental `y` cannot trigger a write. `--git` and `--exec` are mutually exclusive.
+`--git` enforces a read-only subcommand allowlist (`status`, `log`, `diff`, `show`, `blame`, `rev-parse`, `ls-files`, `describe`, `shortlog`, `name-rev`). Write subcommands like `commit`, `push`, `reset`, `rebase`, `merge`, `checkout`, `clean`, etc. are rejected before the confirmation prompt is even shown — an accidental `y` cannot trigger a write. `branch` and `reflog` are intentionally excluded from the allowlist because they have write variants (`branch -d`/`-D`/`-m`, `reflog expire`/`delete`); for read-only branch or reflog inspection, fall back to `--exec` and confirm the proposed plain-read command. `--git` and `--exec` are mutually exclusive.
 
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
