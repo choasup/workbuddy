@@ -31,6 +31,8 @@ To persist a preferred default without typing `--model` every time, create `~/.w
 
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
+Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.
+
 ## Architecture (control plane)
 
 | File | Owner | Purpose |

@@ -6,6 +6,7 @@ import pytest
 
 import workbuddy.cli as cli_mod
 from workbuddy.cli import (
+    MAX_HISTORY_ROWS,
     MAX_LOGGED_RESPONSE_CHARS,
     _extract_text,
     _log_run,
@@ -95,6 +96,96 @@ def test_main_model_flag_overrides_default(monkeypatch, capsys):
     sent = _StubClient.last_messages.last_kwargs
     assert sent is not None
     assert sent["model"] == "claude-opus-4-7"
+
+
+def test_successful_run_appends_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    rc = main(["task"])
+
+    assert rc == 0
+    history_file = tmp_path / "history.jsonl"
+    assert history_file.exists()
+    rows = [json.loads(line) for line in history_file.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert set(row) >= {"ts", "task", "model", "response_chars"}
+    assert row["task"] == "task"
+    assert row["model"] == "claude-sonnet-4-6"
+    assert row["response_chars"] == len("stubbed-claude-reply")
+
+
+def test_history_appends_across_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    assert main(["first"]) == 0
+    assert main(["second"]) == 0
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 2
+    assert rows[0]["task"] == "first"
+    assert rows[1]["task"] == "second"
+
+
+def test_api_error_does_not_create_history(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise _FakeAPIError("network is on fire")
+
+    class _RaisingClient:
+        def __init__(self, **kwargs):
+            self.messages = _RaisingMessages()
+
+    monkeypatch.setattr(cli_mod, "Anthropic", _RaisingClient)
+
+    rc = main(["task"])
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "API call failed" in captured.err
+    assert not (tmp_path / "history.jsonl").exists()
+
+
+def test_history_rotation_caps_at_max(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    history_file = tmp_path / "history.jsonl"
+    seed_lines = [json.dumps({"i": i}) + "\n" for i in range(MAX_HISTORY_ROWS)]
+    history_file.write_text("".join(seed_lines), encoding="utf-8")
+
+    rc = main(["new task"])
+
+    assert rc == 0
+    rows = [
+        json.loads(line)
+        for line in history_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == MAX_HISTORY_ROWS
+    assert rows[-1].get("task") == "new task"
+    assert rows[-1].get("model") == "claude-sonnet-4-6"
+
+
+def test_config_silent_when_default_model_absent(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"unrelated_key": 7}), encoding="utf-8"
+    )
+
+    rc = main(["task"])
+
+    assert rc == 0
+    assert _StubClient.last_messages.last_kwargs["model"] == "claude-sonnet-4-6"
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
 
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):

@@ -33,3 +33,4 @@
 [2026-05-08T12:32:46Z] CODER → _config_path / _load_config_default_model added (json stdlib, fallback for missing file is silent, malformed/wrong-type warns); _build_parser uses the resolved default for both default= and help=; +3 tests; README usage gets a one-line note; pytest 19 passed
 [2026-05-08T12:33:42Z] REVIEWER → 021fc0b PASS — v0.1 slice 1 (config.json) shipped; help reflects resolved default verified out-of-band
 [2026-05-08T12:35:07Z] PLANNER → Append per-run history to ~/.workbuddy/history.jsonl and soften the config.json schema (v0.1 slice 2 of 2)
+[2026-05-08T12:36:59Z] CODER → _history_path / _append_history added with rotation at MAX_HISTORY_ROWS=1000; main success path writes ts/task/model/response_chars; config schema softened (missing default_model key now silent); +5 tests; README usage gets history paragraph; pytest 24 passed; LOC 522 (over former v0 500 ceiling but within planner's <600 target)

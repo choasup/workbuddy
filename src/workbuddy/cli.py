@@ -12,6 +12,7 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 MAX_LOGGED_RESPONSE_CHARS = 4000
 REQUEST_TIMEOUT_SECONDS = 60.0
+MAX_HISTORY_ROWS = 1000
 
 
 def _config_path() -> Path:
@@ -33,7 +34,9 @@ def _load_config_default_model() -> str:
             file=sys.stderr,
         )
         return DEFAULT_MODEL
-    value = data.get("default_model")
+    if "default_model" not in data:
+        return DEFAULT_MODEL
+    value = data["default_model"]
     if isinstance(value, str) and value:
         return value
     print(
@@ -71,6 +74,25 @@ def _log_path() -> Path:
     home_override = os.environ.get("WORKBUDDY_HOME")
     base = Path(home_override) if home_override else Path.home() / ".workbuddy"
     return base / "log.md"
+
+
+def _history_path() -> Path:
+    return _log_path().parent / "history.jsonl"
+
+
+def _append_history(record: dict) -> None:
+    try:
+        path = _history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) > MAX_HISTORY_ROWS:
+            with path.open("w", encoding="utf-8") as f:
+                f.writelines(lines[-MAX_HISTORY_ROWS:])
+    except OSError as exc:
+        print(f"warning: failed to append run to history: {exc}", file=sys.stderr)
 
 
 def _log_run(task: str, response_text: str) -> None:
@@ -121,6 +143,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     text = _extract_text(response)
     print(text)
     _log_run(args.task, text)
+    _append_history(
+        {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "task": args.task,
+            "model": args.model,
+            "response_chars": len(text),
+        }
+    )
     return 0
 
 
