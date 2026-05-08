@@ -14,3 +14,4 @@
 [2026-05-08T12:11:41Z] PLANNER → Append every successful run to `~/.workbuddy/log.md` with a UTC timestamp
 [2026-05-08T12:13:18Z] CODER → per-run logging to ~/.workbuddy/log.md implemented (WORKBUDDY_HOME override, OSError-tolerant, 4000-char truncate); 3 new tests + autouse fixture redirecting log to tmp_path; pytest 7 passed
 [2026-05-08T12:14:25Z] REVIEWER → 0df5af1 PASS
+[2026-05-08T12:14:56Z] PLANNER → Add `--model` flag to override the default Claude model
