@@ -1,22 +1,18 @@
-# Review of 0df5af1
+# Review of dedd0a6
 
 ## Verdict
 PASS
 
 ## Findings
-- All 11 acceptance criteria checked off and behaviourally verified (`pytest -q` → 7 passed independently with both `ANTHROPIC_API_KEY` and `WORKBUDDY_HOME` unset).
-- `_log_path()` correctly honors `WORKBUDDY_HOME`, falling back to `~/.workbuddy/log.md`. `_log_run` creates parent dirs (`mkdir(parents=True, exist_ok=True)`), uses `datetime.now(timezone.utc)` (explicit UTC, no naive datetime), opens in `"a"` mode for append.
-- Entry format is clean and human-readable: `## <UTC ISO8601>` heading + `**Task:** ...` + `**Response:** ...` block, separated by blank lines. Truncation at `MAX_LOGGED_RESPONSE_CHARS = 4000` with `... [truncated]` suffix.
-- `OSError` caught around the whole logging path; warning to stderr; success exit code preserved (the user already received their response, which was the contract).
-- Logging is invoked AFTER `print(text)` — so even if logging fails, the user has already seen the answer.
-- Missing-key code path returns before `_log_run`, so the log file is not created — verified by `test_missing_api_key_does_not_create_log`.
-- The autouse `_isolate_workbuddy_home` fixture is a quietly excellent decision — it guarantees no test can ever pollute the developer's real `~/.workbuddy/log.md`. Verified: `ls -la ~/.workbuddy/log.md` after the test run → file does not exist.
-- `test_log_appends_across_runs` correctly counts `## ` headers (2) to assert append semantics, not overwrite.
-- LOC = 203 total in `src/` + `tests/`; 500-LOC v0 ceiling intact.
-- Edge: if `WORKBUDDY_HOME` points at an existing regular file (not dir), `mkdir(parents=True, exist_ok=True)` raises `NotADirectoryError` (subclass of `OSError`) and is caught — fine.
-- Carry-overs from prior reviews still open and explicitly out of scope: no `LICENSE` file, no `[project.optional-dependencies] dev = ["pytest"]`, no SDK request `timeout=`.
+- All 7 acceptance criteria checked off; `pytest -q` → 8 passed independently with no env vars set.
+- `--model` argparse option declared with `default=DEFAULT_MODEL` and `help=f"Claude model id (default: {DEFAULT_MODEL})"`. The f-string keeps a single source of truth — if `DEFAULT_MODEL` changes, the help text follows automatically.
+- `messages.create(model=args.model, ...)` correctly substitutes the parsed flag for the constant.
+- The existing `test_main_calls_anthropic_and_prints_response` still asserts `sent["model"] == "claude-sonnet-4-6"` and passes unchanged — confirms the default is wired the right way (default kicks in when `--model` is omitted).
+- New `test_main_model_flag_overrides_default` exercises `--model claude-opus-4-7` and asserts the stub records the overriding model id.
+- `workbuddy --help` (verified out-of-band) renders the flag and default cleanly.
+- LOC = 220 total; 500-LOC v0 ceiling intact.
+- No scope creep; no edits outside `src/workbuddy/cli.py` and `tests/test_cli.py` (plus required `NEXT.md` / `LOG.md` updates).
 
 ## Suggestions for next round
-- Next BACKLOG item: `--model` flag (default `claude-sonnet-4-6`). Tight scope: argparse `--model`, plumb through `messages.create(model=args.model, ...)`, default kept; one new test asserting the flag overrides the default.
-- After `--model`, the BACKLOG "Error handling: missing `ANTHROPIC_API_KEY`, network errors" task is a good moment to also add a `timeout=` on `Anthropic(...)` and to catch `anthropic.APIError`/`anthropic.APIConnectionError` with a clean stderr message.
-- The accumulated chore tasks (LICENSE file + `dev = ["pytest"]` extra + SDK timeout) are individually trivial — Planner might bundle them as one "v0 polish" task after the remaining functional items land.
+- Next BACKLOG item: "Error handling: missing `ANTHROPIC_API_KEY`, network errors". The `ANTHROPIC_API_KEY` half is already done — Planner should scope this round to just the network/SDK error half: catch `anthropic.APIConnectionError` / `anthropic.APIStatusError` (or the umbrella `anthropic.APIError`), print a one-line stderr message, exit non-zero. Optionally pass `timeout=` (e.g. 60s) to `Anthropic(...)`.
+- Bundle the small chores (LICENSE file, `[project.optional-dependencies] dev = ["pytest"]`) into a single tidy `chore:` task whenever the functional backlog has a quiet moment.

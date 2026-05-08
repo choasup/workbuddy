@@ -16,3 +16,4 @@
 [2026-05-08T12:14:25Z] REVIEWER → 0df5af1 PASS
 [2026-05-08T12:14:56Z] PLANNER → Add `--model` flag to override the default Claude model
 [2026-05-08T12:15:49Z] CODER → --model flag added to argparse (default claude-sonnet-4-6); messages.create now uses args.model; +1 test asserting override; pytest 8 passed
+[2026-05-08T12:16:42Z] REVIEWER → dedd0a6 PASS
