@@ -138,6 +138,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Maximum agent turns (default: {DEFAULT_AGENT_TURNS}, hard cap: {MAX_AGENT_TURNS_HARD_CAP})",
     )
     parser.add_argument(
+        "--mcp-agent-dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "When combined with --mcp-agent: simulate the loop without executing any tool. "
+            "Each turn prints \"DRY RUN: would call ...\" and feeds Claude a synthetic success "
+            "result so the plan continues. No y/N prompts, no real tool invocations"
+        ),
+    )
+    parser.add_argument(
         "--mcp-server",
         default=None,
         help=(
@@ -419,6 +429,45 @@ def _run_mcp_agent(args) -> int:
             record["claude_reasoning"] = joined_text
             _append_history(record)
             return 5
+
+        if args.mcp_agent_dry_run:
+            print(
+                f"Turn {turn_index + 1}/{max_turns} (DRY RUN)",
+                file=sys.stderr,
+            )
+            if joined_text:
+                print(f"Claude: {joined_text}")
+            print(
+                f"DRY RUN: would call tool {tu_name}({json.dumps(tu_input)})"
+            )
+            text = "(dry-run: tool not actually invoked; assuming success)"
+            is_error = False
+
+            record = dict(base_record)
+            record["mcp_decision"] = "dry-run-skipped"
+            record["mcp_dry_run"] = True
+            record["mcp_tool_name"] = tu_name
+            record["mcp_tool_args"] = tu_input
+            record["mcp_is_error"] = False
+            record["response_chars"] = len(text)
+            record["claude_reasoning"] = joined_text
+            _append_history(record)
+
+            messages.append({"role": "assistant", "content": list(content)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": getattr(tu, "id", "unknown-id"),
+                            "content": text,
+                            "is_error": False,
+                        }
+                    ],
+                }
+            )
+            continue
 
         print(f"Turn {turn_index + 1}/{max_turns}", file=sys.stderr)
         if joined_text:
@@ -1020,6 +1069,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mcp_agent_max_turns != DEFAULT_AGENT_TURNS and not args.mcp_agent:
         print(
             "error: --mcp-agent-max-turns is only meaningful with --mcp-agent",
+            file=sys.stderr,
+        )
+        return 5
+    if args.mcp_agent_dry_run and not args.mcp_agent:
+        print(
+            "error: --mcp-agent-dry-run is only meaningful with --mcp-agent",
             file=sys.stderr,
         )
         return 5

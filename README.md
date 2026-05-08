@@ -77,6 +77,8 @@ workbuddy --mcp-agent --mcp-server "python -m my_server" "find the file with the
 
 Defaults to 3 turns; `--mcp-agent-max-turns N` (capped at 5, hard) overrides. Each turn: Claude proposes ONE tool call (multi-tool-per-turn is cold-rejected — parallel tool calls are deferred), workbuddy shows Claude's reasoning + the proposed call + `Turn N/M`, you confirm with `y` (default no), the tool runs, and the result is fed back to Claude for the next turn. You can abort at any turn with `n` — the loop stops and exits 0. After 2 consecutive tool errors the loop aborts with exit 8 — single errors and error-then-success are still allowed. If the loop hits `max_turns` without a final-text response from Claude, it exits 7. Hallucinated tool names and non-dict inputs are cold-rejected per turn. `--mcp-agent` is mutually exclusive with all other mode flags.
 
+Use `--mcp-agent-dry-run` to inspect the plan without executing: each turn prints `DRY RUN: would call ...` and Claude is fed a synthetic success result so the plan can continue. No `y/N` prompts, no real tool invocations. Cold-rejections (hallucinated tool name, multi-tool-per-turn, non-dict input) still fire — dry-run does not bypass any safety check.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.

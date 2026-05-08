@@ -816,7 +816,13 @@ class _ScriptedMessages:
         self.create_calls = []
 
     def create(self, **kwargs):
-        self.create_calls.append(kwargs)
+        # Snapshot kwargs at call time — the production `messages` list is mutated
+        # across turns, so a stored reference would show the final state, not what
+        # this specific call observed.
+        captured = dict(kwargs)
+        if "messages" in captured:
+            captured["messages"] = list(captured["messages"])
+        self.create_calls.append(captured)
         if not self._responses:
             raise AssertionError("ran out of scripted responses")
         return self._responses.pop(0)
@@ -1217,6 +1223,183 @@ def test_mcp_agent_error_then_success_then_error_continues(tmp_path, monkeypatch
     assert rows[1]["mcp_is_error"] is False
     assert rows[2]["mcp_is_error"] is True
     assert rows[3]["mcp_decision"] == "max-turns-reached"
+
+
+def _setup_agent_dry_run_test(monkeypatch, server_tools_names, anthropic_responses):
+    server_tools = [
+        types.SimpleNamespace(name=n, description="", inputSchema={})
+        for n in server_tools_names
+    ]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    AnthropicCls, scripted = _make_scripted_anthropic(anthropic_responses)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+    return scripted
+
+
+def test_mcp_agent_dry_run_skips_execution(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_dry_run_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("done"),
+        ],
+    )
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-dry-run", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "DRY RUN: would call tool echo" in captured.out
+    assert "done" in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 2
+    assert rows[0]["mcp_decision"] == "dry-run-skipped"
+    assert rows[0]["mcp_dry_run"] is True
+    assert rows[1]["mcp_decision"] == "final-text"
+    assert len(scripted.create_calls) == 2
+
+
+def test_mcp_agent_dry_run_synthetic_result_passed_to_next_turn(tmp_path, monkeypatch):
+    scripted = _setup_agent_dry_run_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_text_response("complete"),
+        ],
+    )
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-dry-run", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 0
+    assert len(scripted.create_calls) == 3
+    turn2_messages = scripted.create_calls[1]["messages"]
+    assert len(turn2_messages) == 3
+    user_tool_result = turn2_messages[2]
+    assert user_tool_result["role"] == "user"
+    tool_result_block = user_tool_result["content"][0]
+    assert tool_result_block["type"] == "tool_result"
+    assert "(dry-run:" in tool_result_block["content"]
+
+
+def test_mcp_agent_dry_run_no_y_n_prompt_appears(tmp_path, monkeypatch, capsys):
+    _setup_agent_dry_run_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("done"),
+        ],
+    )
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-dry-run", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Run this tool? [y/N]:" not in captured.err
+
+
+def test_mcp_agent_dry_run_still_cold_rejects_hallucination(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_dry_run_test(
+        monkeypatch,
+        ["echo"],
+        [_agent_tool_use_response("rm", {"path": "/"})],
+    )
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-dry-run", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "hallucination" in captured.err
+    assert "DRY RUN: would call" not in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_rejection_reason"] == "hallucinated-tool"
+
+
+def test_mcp_agent_dry_run_still_cold_rejects_multi_tool(tmp_path, monkeypatch, capsys):
+    multi = types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(type="tool_use", name="echo", input={"x": 1}, id="t1"),
+            types.SimpleNamespace(type="tool_use", name="echo", input={"x": 2}, id="t2"),
+        ]
+    )
+    scripted = _setup_agent_dry_run_test(monkeypatch, ["echo"], [multi])
+
+    rc = main(
+        ["--mcp-agent", "--mcp-agent-dry-run", "--mcp-server", "fake", "task"]
+    )
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "DRY RUN: would call" not in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_rejection_reason"] == "multi-tool-per-turn"
+
+
+def test_mcp_agent_dry_run_alone_rejected(monkeypatch, capsys):
+    rc = main(["--mcp-agent-dry-run", "task"])
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "only meaningful with --mcp-agent" in captured.err
+
+
+def test_mcp_agent_dry_run_max_turns_reached(tmp_path, monkeypatch, capsys):
+    scripted = _setup_agent_dry_run_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+        ],
+    )
+
+    rc = main(
+        [
+            "--mcp-agent",
+            "--mcp-agent-dry-run",
+            "--mcp-agent-max-turns",
+            "2",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 7
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 3
+    assert rows[0]["mcp_decision"] == "dry-run-skipped"
+    assert rows[1]["mcp_decision"] == "dry-run-skipped"
+    assert rows[2]["mcp_decision"] == "max-turns-reached"
 
 
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
