@@ -102,13 +102,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "then exit. Does NOT call Claude or execute any tool"
         ),
     )
+    mode_group.add_argument(
+        "--mcp-call-tool",
+        default=None,
+        help=(
+            "Invoke the named MCP tool on the server given by --mcp-server, after y/N "
+            "confirmation. Use --mcp-tool-args to pass arguments"
+        ),
+    )
     parser.add_argument(
         "--mcp-server",
         default=None,
         help=(
             "Shell command (parsed via shlex.split) that spawns an MCP server speaking "
-            "stdio JSON-RPC. Required when --mcp-list-tools is set"
+            "stdio JSON-RPC. Required when --mcp-list-tools or --mcp-call-tool is set"
         ),
+    )
+    parser.add_argument(
+        "--mcp-tool-args",
+        default="{}",
+        help="JSON object string for the tool arguments. Default: {}",
     )
     return parser
 
@@ -213,6 +226,107 @@ async def _async_list_tools(server_argv: list[str]):
             await session.initialize()
             result = await session.list_tools()
             return list(getattr(result, "tools", []) or [])
+
+
+async def _async_call_tool(server_argv: list[str], tool_name: str, tool_args: dict):
+    from mcp import StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=server_argv[0], args=server_argv[1:])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await session.call_tool(tool_name, tool_args)
+
+
+def _run_mcp_call_tool(args) -> int:
+    raw = args.mcp_server or ""
+    try:
+        server_argv = shlex.split(raw)
+    except ValueError as exc:
+        print(f"error: invalid --mcp-server: {exc}", file=sys.stderr)
+        return 5
+    if not server_argv:
+        print("error: invalid --mcp-server: empty command", file=sys.stderr)
+        return 5
+
+    try:
+        tool_args = json.loads(args.mcp_tool_args)
+    except json.JSONDecodeError as exc:
+        print(
+            f"error: --mcp-tool-args must be a JSON object: {exc}",
+            file=sys.stderr,
+        )
+        return 5
+    if not isinstance(tool_args, dict):
+        print(
+            f"error: --mcp-tool-args must be a JSON object (got: {type(tool_args).__name__})",
+            file=sys.stderr,
+        )
+        return 5
+
+    if args.task:
+        print(
+            "note: --mcp-call-tool mode ignores the task argument",
+            file=sys.stderr,
+        )
+
+    tool_name = args.mcp_call_tool
+    proposed_payload = json.dumps(tool_args)
+    print(f"Proposed MCP tool call: {tool_name}({proposed_payload})")
+    sys.stderr.write("Run this tool? [y/N]: ")
+    sys.stderr.flush()
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "task": args.task,
+        "model": args.model,
+        "response_chars": 0,
+        "mcp_tool_name": tool_name,
+        "mcp_tool_args": tool_args,
+    }
+
+    if answer.strip() not in {"y", "Y"}:
+        print("aborted", file=sys.stderr)
+        record["mcp_decision"] = "aborted"
+        _append_history(record)
+        return 0
+
+    try:
+        result = asyncio.run(
+            asyncio.wait_for(
+                _async_call_tool(server_argv, tool_name, tool_args),
+                timeout=MCP_TIMEOUT_SECONDS,
+            )
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        print(
+            f"error: MCP server did not respond within {MCP_TIMEOUT_SECONDS}s",
+            file=sys.stderr,
+        )
+        return 6
+    except Exception as exc:
+        print(f"error: MCP error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 5
+
+    is_error = bool(
+        getattr(result, "isError", None) or getattr(result, "is_error", False)
+    )
+    text = _extract_text(result)
+    if text:
+        print(text)
+
+    record["mcp_decision"] = "run"
+    record["mcp_is_error"] = is_error
+    record["response_chars"] = len(text)
+    _append_history(record)
+
+    return 5 if is_error else 0
 
 
 def _run_mcp_list_tools(args) -> int:
@@ -381,15 +495,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mcp_list_tools and args.mcp_server is None:
         print("error: --mcp-list-tools requires --mcp-server", file=sys.stderr)
         return 5
-    if args.mcp_server is not None and not args.mcp_list_tools:
+    if args.mcp_call_tool is not None and args.mcp_server is None:
+        print("error: --mcp-call-tool requires --mcp-server", file=sys.stderr)
+        return 5
+    if (
+        args.mcp_server is not None
+        and not args.mcp_list_tools
+        and args.mcp_call_tool is None
+    ):
         print(
-            "error: --mcp-server is only meaningful with --mcp-list-tools",
+            "error: --mcp-server is only meaningful with --mcp-list-tools or --mcp-call-tool",
+            file=sys.stderr,
+        )
+        return 5
+    if args.mcp_tool_args != "{}" and args.mcp_call_tool is None:
+        print(
+            "error: --mcp-tool-args is only meaningful with --mcp-call-tool",
             file=sys.stderr,
         )
         return 5
 
     if args.mcp_list_tools:
         return _run_mcp_list_tools(args)
+    if args.mcp_call_tool is not None:
+        return _run_mcp_call_tool(args)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:

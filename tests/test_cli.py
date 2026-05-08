@@ -300,6 +300,225 @@ def test_mcp_list_tools_ignores_task_arg(monkeypatch, capsys):
     assert "x: y" in captured.out
 
 
+def _make_async_call_tool_returning(text: str, is_error: bool = False, attr: str = "isError"):
+    async def _fake(server_argv, tool_name, tool_args):
+        block = types.SimpleNamespace(text=text)
+        return types.SimpleNamespace(content=[block], **{attr: is_error})
+
+    return _fake
+
+
+async def _async_call_tool_must_not_be_called(*a, **k):
+    raise AssertionError("_async_call_tool should not be called when aborted/cold-rejected")
+
+
+async def _async_call_tool_raises_timeout(*a, **k):
+    raise TimeoutError()
+
+
+async def _async_call_tool_raises_boom(*a, **k):
+    raise RuntimeError("boom")
+
+
+_FAKE_LAST_CALL: dict = {}
+
+
+async def _fake_async_call_tool_recording(server_argv, tool_name, tool_args):
+    _FAKE_LAST_CALL["server_argv"] = server_argv
+    _FAKE_LAST_CALL["tool_name"] = tool_name
+    _FAKE_LAST_CALL["tool_args"] = tool_args
+    block = types.SimpleNamespace(text="42")
+    return types.SimpleNamespace(content=[block], isError=False)
+
+
+def test_mcp_call_tool_runs_after_yes(tmp_path, monkeypatch, capsys):
+    _FAKE_LAST_CALL.clear()
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_async_call_tool_recording)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        [
+            "--mcp-call-tool",
+            "echo",
+            "--mcp-tool-args",
+            '{"x": 1}',
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "42" in captured.out
+    assert _FAKE_LAST_CALL == {
+        "server_argv": ["fake"],
+        "tool_name": "echo",
+        "tool_args": {"x": 1},
+    }
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_tool_name"] == "echo"
+    assert rows[0]["mcp_tool_args"] == {"x": 1}
+    assert rows[0]["mcp_decision"] == "run"
+    assert rows[0]["mcp_is_error"] is False
+
+
+def test_mcp_call_tool_aborts_on_n(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    rc = main(
+        [
+            "--mcp-call-tool",
+            "echo",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_decision"] == "aborted"
+    assert "mcp_is_error" not in rows[0]
+
+
+def test_mcp_call_tool_invalid_json_args_is_cold_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(
+        [
+            "--mcp-call-tool",
+            "echo",
+            "--mcp-tool-args",
+            "not json",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "must be a JSON object" in captured.err
+    assert not (tmp_path / "history.jsonl").exists()
+
+
+def test_mcp_call_tool_args_must_be_dict_not_array(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(
+        [
+            "--mcp-call-tool",
+            "echo",
+            "--mcp-tool-args",
+            "[1, 2, 3]",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "must be a JSON object" in captured.err
+    assert not (tmp_path / "history.jsonl").exists()
+
+
+def test_mcp_call_tool_requires_mcp_server(capsys):
+    rc = main(["--mcp-call-tool", "echo", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "requires --mcp-server" in captured.err
+
+
+def test_mcp_tool_args_alone_errors(capsys):
+    rc = main(["--mcp-tool-args", '{"x": 1}', "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "only meaningful with --mcp-call-tool" in captured.err
+
+
+def test_mcp_call_tool_is_error_returns_5(tmp_path, monkeypatch, capsys):
+    fake = _make_async_call_tool_returning("failed: bad input", is_error=True)
+    monkeypatch.setattr(cli_mod, "_async_call_tool", fake)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-call-tool", "echo", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "failed: bad input" in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["mcp_is_error"] is True
+    assert rows[0]["mcp_decision"] == "run"
+
+
+def test_mcp_call_tool_timeout(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_raises_timeout)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-call-tool", "echo", "--mcp-server", "fake", "task"])
+
+    assert rc == 6
+    captured = capsys.readouterr()
+    assert "did not respond within" in captured.err
+    assert not (tmp_path / "history.jsonl").exists()
+
+
+def test_mcp_call_tool_protocol_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_raises_boom)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-call-tool", "echo", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "MCP error:" in captured.err
+    assert "boom" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "history.jsonl").exists()
+
+
+def test_mcp_call_tool_default_args_is_empty_dict(tmp_path, monkeypatch):
+    _FAKE_LAST_CALL.clear()
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _fake_async_call_tool_recording)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-call-tool", "echo", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    assert _FAKE_LAST_CALL["tool_args"] == {}
+
+
+def test_mcp_call_tool_mutually_exclusive_with_list_tools(capsys):
+    with pytest.raises(SystemExit) as ei:
+        main(["--mcp-call-tool", "x", "--mcp-list-tools", "task"])
+    assert ei.value.code != 0
+
+
+def test_mcp_call_tool_mutually_exclusive_with_exec_and_git(capsys):
+    with pytest.raises(SystemExit):
+        main(["--mcp-call-tool", "x", "--exec", "task"])
+    with pytest.raises(SystemExit):
+        main(["--mcp-call-tool", "x", "--git", "task"])
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)

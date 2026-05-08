@@ -51,7 +51,15 @@ Pass `--mcp-list-tools --mcp-server "<cmd>"` to inspect an MCP server's advertis
 workbuddy --mcp-list-tools --mcp-server "python -m my_mcp_server" .
 ```
 
-This mode connects to the MCP server over stdio, performs the standard initialize / list-tools handshake, and prints one line per tool (`name: description`). It does NOT call Claude and does NOT execute any tool — it is pure inspection. The task argument is required by argparse but ignored. A future slice will add tool execution. `--mcp-list-tools` is mutually exclusive with `--exec` and `--git`.
+This mode connects to the MCP server over stdio, performs the standard initialize / list-tools handshake, and prints one line per tool (`name: description`). It does NOT call Claude and does NOT execute any tool — it is pure inspection. The task argument is required by argparse but ignored. `--mcp-list-tools` is mutually exclusive with `--exec`, `--git`, and `--mcp-call-tool`.
+
+Pass `--mcp-call-tool NAME --mcp-tool-args JSON` to invoke a specific tool with user-provided arguments:
+
+```bash
+workbuddy --mcp-call-tool echo --mcp-tool-args '{"text": "hi"}' --mcp-server "python -m my_server" .
+```
+
+Arguments must be a JSON object (top-level `{...}`). Bad JSON or non-object args are rejected before any confirmation prompt. The proposed call is shown as `Proposed MCP tool call: name(json-args)`, then a `y/N` confirmation prompt with default no — empty input or EOF aborts. On success, the tool's text content is printed and exit code is 0; if the tool reports `isError: true`, the error text is still printed and exit code is 5; timeouts exit 6. NO Claude is in the loop in this slice — Claude-driven tool selection is a future slice. `--mcp-call-tool` is mutually exclusive with `--exec`, `--git`, and `--mcp-list-tools`.
 
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 

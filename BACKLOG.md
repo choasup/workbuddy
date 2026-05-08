@@ -19,4 +19,4 @@
 - [x] Git operations helper *(`--git` mode with strict read-only subcommand allowlist (10 entries); `branch`/`reflog` excluded due to write variants; mutually exclusive with `--exec`)*
 
 ## v0.2
-- [⏳] MCP integration *(slice 1: --mcp-list-tools listing only; tool execution and resource subscription deferred)*
+- [⏳] MCP integration *(slice 1+2 shipped: --mcp-list-tools and --mcp-call-tool with user-provided args; slice 3 will add Claude-driven tool selection)*
