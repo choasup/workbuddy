@@ -12,3 +12,4 @@
 [2026-05-08T12:09:47Z] CODER → Anthropic SDK wired into cli.py (default model claude-sonnet-4-6, ANTHROPIC_API_KEY check); test_cli.py rewritten with stubbed SDK (4 tests, no network); pytest 4 passed
 [2026-05-08T12:10:55Z] REVIEWER → 64269df PASS
 [2026-05-08T12:11:41Z] PLANNER → Append every successful run to `~/.workbuddy/log.md` with a UTC timestamp
+[2026-05-08T12:13:18Z] CODER → per-run logging to ~/.workbuddy/log.md implemented (WORKBUDDY_HOME override, OSError-tolerant, 4000-char truncate); 3 new tests + autouse fixture redirecting log to tmp_path; pytest 7 passed

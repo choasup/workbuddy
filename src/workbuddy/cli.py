@@ -1,12 +1,15 @@
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
 from anthropic import Anthropic
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
+MAX_LOGGED_RESPONSE_CHARS = 4000
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -27,6 +30,32 @@ def _extract_text(response) -> str:
     return "".join(parts)
 
 
+def _log_path() -> Path:
+    home_override = os.environ.get("WORKBUDDY_HOME")
+    base = Path(home_override) if home_override else Path.home() / ".workbuddy"
+    return base / "log.md"
+
+
+def _log_run(task: str, response_text: str) -> None:
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = response_text
+        if len(body) > MAX_LOGGED_RESPONSE_CHARS:
+            body = body[:MAX_LOGGED_RESPONSE_CHARS] + "... [truncated]"
+        entry = (
+            f"## {timestamp}\n"
+            f"**Task:** {task}\n\n"
+            f"**Response:**\n\n"
+            f"{body}\n\n"
+        )
+        with path.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except OSError as exc:
+        print(f"warning: failed to append run to log: {exc}", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -45,7 +74,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": args.task}],
     )
-    print(_extract_text(response))
+    text = _extract_text(response)
+    print(text)
+    _log_run(args.task, text)
     return 0
 
 

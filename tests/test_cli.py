@@ -6,6 +6,11 @@ import workbuddy.cli as cli_mod
 from workbuddy.cli import main
 
 
+@pytest.fixture(autouse=True)
+def _isolate_workbuddy_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKBUDDY_HOME", str(tmp_path))
+
+
 class _StubMessages:
     def __init__(self, text: str):
         self._text = text
@@ -72,3 +77,40 @@ def test_main_missing_argument_exits_nonzero(capsys):
     assert excinfo.value.code != 0
     captured = capsys.readouterr()
     assert captured.err
+
+
+def test_successful_run_appends_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    rc = main(["hello"])
+
+    assert rc == 0
+    log_file = tmp_path / "log.md"
+    assert log_file.exists()
+    contents = log_file.read_text(encoding="utf-8")
+    assert "hello" in contents
+    assert "stubbed-claude-reply" in contents
+
+
+def test_log_appends_across_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    assert main(["first task"]) == 0
+    assert main(["second task"]) == 0
+
+    contents = (tmp_path / "log.md").read_text(encoding="utf-8")
+    assert contents.count("## ") == 2
+    assert "first task" in contents
+    assert "second task" in contents
+
+
+def test_missing_api_key_does_not_create_log(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)
+
+    rc = main(["hello"])
+
+    assert rc != 0
+    assert not (tmp_path / "log.md").exists()
