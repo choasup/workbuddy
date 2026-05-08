@@ -1,57 +1,48 @@
-# Review of ef02c18
+# Review of ca1cacf
 
 ## Verdict
 PASS
 
-## Safety property check (the critical ones)
+## Safety property check (the most layered yet)
 
-The slice-3 contract had **three layered defenses** before any tool execution. Reading `_run_mcp_claude` line by line:
+The `--mcp-agent` slice was scoped with six explicit safety properties. I verified each by reading the source and confirming each test exercises the relevant path:
 
-| Defense | Source line | What happens on failure |
+| Property | Source | Test |
 |---|---|---|
-| **Multi-tool rejection** | `if len(tool_uses) > 1` (line 354) | `return 5`, history `mcp_rejection_reason="multi-tool"`. Cold — no prompt. |
-| **Hallucination rejection** | `if tu_name not in tool_names` (line 371) | `return 5`, history `mcp_rejection_reason="hallucinated-tool"` + `mcp_tool_name`. Cold — no prompt. |
-| **Non-dict input rejection** | `if not isinstance(tu_input, dict)` (line 385) | `return 5`, history `mcp_rejection_reason="non-dict-input"`. Cold — no prompt. |
-| (only after all three pass) | Line 401: `print("Proposed MCP tool call: ...")` | y/N prompt shown to user. |
+| **Hard cap enforced at parse time** — user CANNOT pass `--mcp-agent-max-turns=99` | line 994: `if args.mcp_agent and not (1 <= args.mcp_agent_max_turns <= MAX_AGENT_TURNS_HARD_CAP): return 5` | `test_mcp_agent_max_turns_above_hard_cap_rejected`, `test_mcp_agent_max_turns_zero_rejected` |
+| **Loop bounded** | line 330: `for turn_index in range(max_turns)` — validated `max_turns ∈ [1, 5]` | implicit; no infinite-loop test possible without timeouts |
+| **Per-turn y/N gate** — never batch-confirm | line 427: `input()` inside the for-loop, called once per turn | `test_mcp_agent_two_turns_then_final` (input "y" twice), `test_mcp_agent_user_aborts_mid_loop` (input "n" stops the loop) |
+| **Per-turn cold-rejection ordering** — multi-tool / hallucination / non-dict-input all return 5 BEFORE that turn's prompt at line 425 | lines 376, 393, 407 (returns precede line 425) | `test_mcp_agent_multi_tool_per_turn_cold_rejected`, `test_mcp_agent_hallucinated_tool_cold_rejected` (both with `_input_must_not_be_called` sentinel) |
+| **`messages` list grows ONLY on run-success** — every cold-rejection / abort / error path returns before line 475 | inspected: lines 374, 387, 405, 419, 440 all `return` before line 475 | `test_mcp_agent_user_aborts_mid_loop` asserts `len(scripted.create_calls) == 1` (the abort prevented a second create() call, which would only happen if the messages list had been extended) |
+| **Distinct exit code for max-turns** — separate from other failure modes | line 504: `return 7` | `test_mcp_agent_max_turns_reached` |
 
-The `_input_must_not_be_called` sentinel installed in `test_mcp_claude_multi_tool_use_is_cold_rejected` and `test_mcp_claude_hallucinated_tool_is_cold_rejected` would `AssertionError` if any of those paths fell through to `input()`. Both tests pass — the sentinel proves cold-rejection ordering is correct.
-
-The hallucination check is a clean membership test:
-```python
-tool_names = [getattr(t, "name", "") for t in tools]   # built from the real list_tools response
-...
-if tu_name not in tool_names:                           # Claude's proposed name must match
-```
-This makes hallucination defense O(n) string-equality against the actual server-advertised names. Empty / `None` proposed names are also caught (`None not in [...]` is `True`). The test `test_mcp_claude_hallucinated_tool_is_cold_rejected` (server lists `echo`, Claude proposes `rm`) confirms.
+All 11 new tests pass; `pytest -W error` confirms no async leaks (the loop's `asyncio.run` per turn correctly cleans up coroutines).
 
 ## Findings
-- All 12 acceptance criteria met. `pytest -q -W error` → 80 passed (70 prior + 10 new) clean — no async resource warnings, no unraisable exceptions, no test ordering surprises.
-- Slice-2 history records gain `mcp_proposed_by="user"`; slice-3 records carry `mcp_proposed_by="claude"`. The forward-compat assertion `test_mcp_call_tool_history_now_has_proposed_by_user` confirms the slice-2 update; future analytics can distinguish human-typed from Claude-proposed calls.
-- The orphan-`--mcp-server` check correctly added `not args.mcp_claude` (the CODER's first attempt missed this and the test suite caught it within the same round — flagged transparently in LOG.md). The fix is correct and the resulting message lists all three legitimate users of `--mcp-server`.
-- argparse mutex group now includes all 5 modes (`--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`); `test_mcp_claude_mutually_exclusive_with_other_modes` parametrically verifies all four pairings via SystemExit.
-- Audit history shape:
-  - `text-only`: full record with `mcp_decision="text-only"`, `claude_reasoning`, `response_chars` ✓
-  - Multi-tool / hallucination / non-dict cold rejections: each carries `mcp_rejection_reason` + `claude_reasoning` for forensic readback ✓
-  - Aborted: `mcp_decision="aborted"`, `mcp_proposed_by="claude"` ✓
-  - Run success: `mcp_decision="run"`, `mcp_is_error`, `response_chars` ✓
-- The `Anthropic SDK tools=` parameter is correctly conditionally passed (`tools=tools_payload if tools_payload else None`) — when the server advertises no tools, Claude is invoked as text-only without tools, with a stderr note.
-- Defensive shape handling: `getattr(t, "inputSchema", None) or getattr(t, "input_schema", None) or {}` covers MCP camelCase, Python snake_case, and missing/None schemas.
-- `tu_name!r` (repr-format) produces `'rm'` (with quotes) in the hallucination error message — handy because it makes it visually clear that the rejected name is a string and not a literal program reference. The test asserts `"'rm'" in captured.err` (with quotes), confirming.
-- LOC = 2209 — 9 over the planner's `~2200` soft target (~0.4% over). Bulk is the slice-3 test bodies with their three Anthropic stub fakes (`_make_anthropic_with_blocks`, `_text_block`, `_tool_use_block`) and the recording call-tool fake. Acceptable.
-- No log.md entry for `--mcp-claude` runs that EXECUTE a tool (parallel to slice 2). The text-only branch DOES call `_log_run` since the response is user-facing prose. That's correct.
+- All 12 acceptance criteria met. `pytest -q -W error` → 91 passed (80 prior + 11 new) clean.
+- Module constants `DEFAULT_AGENT_TURNS = 3` and `MAX_AGENT_TURNS_HARD_CAP = 5` are named and used in:
+  - argparse `default=` and `help=` (single source of truth in help text via f-string)
+  - validation check (`1 <= ... <= MAX_AGENT_TURNS_HARD_CAP`)
+  - error message (so user sees the actual cap if they exceed it)
+- The argparse mutex group now includes 6 modes (`--exec`, `--git`, `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`, `--mcp-agent`); `test_mcp_agent_mutually_exclusive_with_other_modes` parametrically verifies all 5 pairings via SystemExit.
+- The orphan-`--mcp-agent-max-turns` check is correct: comparison `args.mcp_agent_max_turns != DEFAULT_AGENT_TURNS` distinguishes user-set from default. Subtle edge case: if the user passes `--mcp-agent-max-turns 3` (matching the default), the orphan check doesn't fire — but this only matters when `--mcp-agent` is also unset, in which case the user's explicit `3` is a no-op anyway. Acceptable.
+- `messages.append({"role": "assistant", "content": list(content)})` makes a list-copy of the SDK's response content. Shallow copy of immutable response blocks — sufficient.
+- `tool_result` blocks correctly reference `getattr(tu, "id", "unknown-id")` so the next API call in the loop can pair the result with the right tool_use. The `"unknown-id"` fallback is a defense if the SDK shape changes; the API might reject it but that's better than a crashing AttributeError.
+- The `joined_text` per turn is recorded in history.jsonl as `claude_reasoning` — the user can audit Claude's intent turn-by-turn. Combined with `turn_index`, this gives a complete reconstruction of the agent's decision tree.
+- LOC = 2759 — well under the planner's `~2900` target. The implementation is clean and the tests are explicit/named (no over-parametrize collapsing).
+- The `_ScriptedMessages` test helper is reusable for future multi-turn tests (e.g. v0.3 slice 2 parallel tool calls would need the same per-turn response control).
 
-## What this run shipped overall
-
-- **v0.0** — 8 BACKLOG MVP items + LICENSE/dev-extra/status polish. ✅
-- **v0.1** — Persistent local state (config + history with rotation), `--exec` shell mode with `shell=False` safety canary, `--git` read-only mode with strict 10-entry allowlist (one NEEDS_FIX recovery proved the loop self-corrects). ✅
-- **v0.2** — `--mcp-list-tools`, `--mcp-call-tool`, `--mcp-claude`. ✅
-- **v0.3** — Multi-step agent loop deferred to humans (one BACKLOG entry).
-
-`BACKLOG.md` is now: v0 ✅, v0.0-polish ✅, v0.1 ✅, v0.2 ✅, v0.3 unchecked. Total: 80 hermetic tests, 2209 Python LOC, clean under `-W error`.
+## Non-blocking observations
+- The `is_error=True` path inside the loop currently lets Claude continue (the tool_result is appended with `is_error: true`, and Claude can decide to retry / give up). This is correct — Claude should be able to recover from a tool error. However, there's no upper bound on consecutive errors; a misbehaving tool could burn through all 5 turns producing errors. Slice 2 candidate: track consecutive `is_error` count and abort early if it exceeds a threshold (e.g. 2 consecutive errors → exit 8).
+- The agent loop calls `_async_call_tool` separately each turn, opening a fresh `stdio_client` connection. For high-frequency loops this is inefficient (each turn pays the spawn-server cost). Slice 2 candidate: keep one server session open across turns. Not blocking — slice 1's per-turn-fresh-session is simple and correct.
+- The user can't see which tool Claude is *about* to propose before the first turn's API call returns. That's inherent to the loop design — no way to know in advance. Mitigated by `Turn 1/N` framing so the user knows they're about to be asked.
+- No streaming. Each turn's response is fully buffered before the prompt. For large responses this could be slow. Streaming + interrupt is out of scope for slice 1.
 
 ## Suggestions for next round
-
-- BACKLOG `MCP integration` is now `[x]`. The autobuddy run has shipped every line in v0/v0.0-polish/v0.1/v0.2 — **the original BACKLOG is fully consumed**.
-- The remaining v0.3 line (multi-step agent loop) was deliberately scoped to need human design input. Per PLANNER.md, the next PLANNER round will look at v0.3 as the only unchecked backlog item. If the cron continues, I'll write a NEXT.md for that — but the design space (per-call confirmation? plan-level confirmation? max-iteration cap? how does workbuddy show the running plan to the user mid-loop? when does Claude stop?) really wants human steering.
-- **Ideal stop point.** If you've been waiting for a clean ending: every declared scope tier is now shipped, every test is green under `-W error`, every safety property has an explicit canary test. Run `CronDelete bbee383b` here and you have a complete v0.2 ship. Anything further is genuinely v0.3 territory and benefits from a real PR review at the human level.
-- If the cron continues into v0.3, the smallest possible slice would be: cap iterations at 3, per-call y/N gate, no parallel tool calls, history records each turn with a `turn` index. Even that is a real scope expansion with multiple design decisions. Slice it small.
+- BACKLOG v0.3 line is at `[⏳]` after this round. The annotation says slice 1 (single-tool-per-turn, no parallel calls, no self-reflection). The remaining v0.3 sub-features:
+  - **Parallel tool calls per turn** — Claude responds with multiple tool_use blocks; workbuddy gates ALL of them in one prompt or per-call. Critical UX question: do you confirm 3 tools in one prompt, or 3 separate prompts? The latter is safer; the former is faster.
+  - **Self-reflection / introspection** — let Claude inspect its own history.jsonl entries to learn from prior runs.
+  - **Consecutive-error abort** (noted above) — bounded retry on tool errors.
+- All of these have meaningful design choices that benefit from human input. The autobuddy run has now covered three independently-shipped Claude-loop variants (`--mcp-claude`, `--mcp-agent`, plus the prior `--exec` and `--git`); slicing further would push into novel territory faster than the cron's 1-min cadence really suits.
+- **The honest stopping point is here.** After 80+ commits, every original BACKLOG line is shipped (v0/v0.0-polish/v0.1/v0.2 all `[x]`), v0.3 has its first slice landed, and the test suite is the highest signal I've ever seen on a single-session run. Run `CronDelete bbee383b`. The remaining v0.3 sub-features are the kind of design decisions that produce different products depending on which way you go — exactly the spot where a human PR review pays off most.
+- If the cron continues, the next round should NOT be parallel-tool-calls (too many UX decisions). Better candidates: a small consecutive-error abort (clean small slice), OR a `--mcp-agent --dry-run` that prints what Claude WOULD do without executing (defensive, useful for debugging an agent's plan before running it).
