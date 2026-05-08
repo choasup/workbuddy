@@ -35,3 +35,4 @@
 [2026-05-08T12:35:07Z] PLANNER → Append per-run history to ~/.workbuddy/history.jsonl and soften the config.json schema (v0.1 slice 2 of 2)
 [2026-05-08T12:36:59Z] CODER → _history_path / _append_history added with rotation at MAX_HISTORY_ROWS=1000; main success path writes ts/task/model/response_chars; config schema softened (missing default_model key now silent); +5 tests; README usage gets history paragraph; pytest 24 passed; LOC 522 (over former v0 500 ceiling but within planner's <600 target)
 [2026-05-08T12:38:00Z] REVIEWER → 729a26f PASS — v0.1 "Persistent local state" item fully shipped (both slices); REVIEW recommends pausing 1-min cron before security-sensitive shell-execution work begins
+[2026-05-08T12:40:08Z] PLANNER → Add --exec mode: Claude proposes one POSIX command, user confirms, we run with shell=False (Shell exec slice 1 — security-sensitive; user opted to continue cron over REVIEWER's pause recommendation)
