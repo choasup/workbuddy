@@ -23,3 +23,4 @@
 [2026-05-08T12:20:49Z] PLANNER → Add a README usage section with install command and a working example
 [2026-05-08T12:21:43Z] CODER → README.md gains ## Install (pip install -e ., 3.10+) and ## Usage (ANTHROPIC_API_KEY, sample invocation, --model with default, ~/.workbuddy/log.md + WORKBUDDY_HOME); existing bootstrap framing preserved; pytest 9 still passing
 [2026-05-08T12:22:41Z] REVIEWER → 654abb5 PASS
+[2026-05-08T12:23:52Z] PLANNER → Cover remaining helper edge cases with direct unit tests for _extract_text and _log_run
