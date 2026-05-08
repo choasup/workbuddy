@@ -6,10 +6,16 @@ import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Sequence
 
 from anthropic import Anthropic, APIError
+
+try:
+    VERSION = _pkg_version("workbuddy")
+except PackageNotFoundError:
+    VERSION = "0.0.0+unknown"
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
@@ -76,6 +82,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="workbuddy",
         description="Minimal Python CLI agent assistant backed by the Claude API.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"workbuddy {VERSION}",
     )
     parser.add_argument("task", help="Natural-language task for the agent to run.")
     parser.add_argument(

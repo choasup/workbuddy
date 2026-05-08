@@ -1671,6 +1671,33 @@ def test_reflect_handles_tool_use_in_response_gracefully(tmp_path, monkeypatch, 
     assert "model proposed a tool call" in captured.err
 
 
+def test_version_prints_version_and_exits_zero(capsys):
+    with pytest.raises(SystemExit) as ei:
+        main(["--version"])
+    assert ei.value.code == 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "workbuddy " in combined
+    assert cli_mod.VERSION in combined
+
+
+def test_version_does_not_require_task_arg(capsys):
+    """--version must short-circuit BEFORE the positional 'task' arg is validated."""
+    with pytest.raises(SystemExit) as ei:
+        main(["--version"])
+    assert ei.value.code == 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "the following arguments are required" not in combined
+
+
+def test_version_does_not_require_api_key(monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        main(["--version"])
+    assert ei.value.code == 0
+
+
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(cli_mod, "Anthropic", _StubClient)

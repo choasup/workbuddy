@@ -10,7 +10,7 @@ Requires Python 3.10 or newer.
 pip install -e .
 ```
 
-This installs an editable build of the `workbuddy` package and exposes a `workbuddy` console script on your `PATH`.
+This installs an editable build of the `workbuddy` package and exposes a `workbuddy` console script on your `PATH`. Run `workbuddy --version` to confirm the install: it prints the package version and exits.
 
 ## Usage
 
