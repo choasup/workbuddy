@@ -21,6 +21,9 @@ MCP_TIMEOUT_SECONDS = 30
 DEFAULT_AGENT_TURNS = 3
 MAX_AGENT_TURNS_HARD_CAP = 5
 MAX_CONSECUTIVE_ERRORS = 2
+REFLECTION_PROMPT = (
+    "Did this complete the task? Answer briefly (1-2 sentences). Do not call any tool."
+)
 READONLY_GIT_SUBCMDS = frozenset(
     {
         "status",
@@ -145,6 +148,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "When combined with --mcp-agent: simulate the loop without executing any tool. "
             "Each turn prints \"DRY RUN: would call ...\" and feeds Claude a synthetic success "
             "result so the plan continues. No y/N prompts, no real tool invocations"
+        ),
+    )
+    parser.add_argument(
+        "--reflect",
+        action="store_true",
+        default=False,
+        help=(
+            "When combined with --mcp-agent: after the loop ends, ask Claude in ONE additional "
+            "API call whether the task was completed. Prints 'Reflection: <text>'. "
+            "Single-shot — no tools, no looping"
         ),
     )
     parser.add_argument(
@@ -277,6 +290,57 @@ async def _async_call_tool(server_argv: list[str], tool_name: str, tool_args: di
             return await session.call_tool(tool_name, tool_args)
 
 
+def _reflect_if_enabled(args, client, messages) -> None:
+    if not args.reflect:
+        return
+    if args.mcp_agent_dry_run:
+        print(
+            "note: --reflect skipped in dry-run mode (synthetic results)",
+            file=sys.stderr,
+        )
+        return
+
+    reflect_messages = list(messages) + [{"role": "user", "content": REFLECTION_PROMPT}]
+    try:
+        response = client.messages.create(
+            model=args.model,
+            max_tokens=MAX_TOKENS,
+            messages=reflect_messages,
+        )
+    except APIError as exc:
+        print(
+            f"warning: --reflect API call failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    except Exception as exc:
+        print(
+            f"warning: --reflect API call failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    content = list(getattr(response, "content", []) or [])
+    if any(getattr(b, "type", None) == "tool_use" for b in content):
+        print(
+            "warning: --reflect: model proposed a tool call; ignored — reflection is single-shot",
+            file=sys.stderr,
+        )
+    text = _extract_text(response)
+    print(f"Reflection: {text}" if text else "Reflection: (no text)")
+
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "task": args.task,
+        "model": args.model,
+        "response_chars": len(text),
+        "mcp_proposed_by": "claude",
+        "mcp_decision": "reflection",
+        "reflection_text": text,
+    }
+    _append_history(record)
+
+
 def _run_mcp_agent(args) -> int:
     raw = args.mcp_server or ""
     try:
@@ -383,6 +447,7 @@ def _run_mcp_agent(args) -> int:
             record["mcp_decision"] = "final-text"
             record["claude_reasoning"] = joined_text
             _append_history(record)
+            _reflect_if_enabled(args, client, messages)
             return 0
 
         if len(tool_uses) > 1:
@@ -488,6 +553,7 @@ def _run_mcp_agent(args) -> int:
             record["mcp_tool_args"] = tu_input
             record["claude_reasoning"] = joined_text
             _append_history(record)
+            _reflect_if_enabled(args, client, messages)
             return 0
 
         try:
@@ -538,6 +604,7 @@ def _run_mcp_agent(args) -> int:
             abort_record["mcp_decision"] = "consecutive-error-abort"
             abort_record["consecutive_errors"] = consecutive_errors
             _append_history(abort_record)
+            _reflect_if_enabled(args, client, messages)
             return 8
 
         messages.append({"role": "assistant", "content": list(content)})
@@ -569,6 +636,7 @@ def _run_mcp_agent(args) -> int:
         "mcp_decision": "max-turns-reached",
     }
     _append_history(record)
+    _reflect_if_enabled(args, client, messages)
     return 7
 
 
@@ -1075,6 +1143,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mcp_agent_dry_run and not args.mcp_agent:
         print(
             "error: --mcp-agent-dry-run is only meaningful with --mcp-agent",
+            file=sys.stderr,
+        )
+        return 5
+    if args.reflect and not args.mcp_agent:
+        print(
+            "error: --reflect is only meaningful with --mcp-agent",
             file=sys.stderr,
         )
         return 5

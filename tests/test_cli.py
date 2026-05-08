@@ -825,7 +825,12 @@ class _ScriptedMessages:
         self.create_calls.append(captured)
         if not self._responses:
             raise AssertionError("ran out of scripted responses")
-        return self._responses.pop(0)
+        next_response = self._responses.pop(0)
+        # Allow tests to inject exceptions at specific call indices by passing
+        # an Exception instance in the scripted list.
+        if isinstance(next_response, BaseException):
+            raise next_response
+        return next_response
 
 
 def _make_scripted_anthropic(responses):
@@ -1400,6 +1405,270 @@ def test_mcp_agent_dry_run_max_turns_reached(tmp_path, monkeypatch, capsys):
     assert rows[0]["mcp_decision"] == "dry-run-skipped"
     assert rows[1]["mcp_decision"] == "dry-run-skipped"
     assert rows[2]["mcp_decision"] == "max-turns-reached"
+
+
+def _setup_reflect_test(monkeypatch, server_tools_names, anthropic_responses):
+    server_tools = [
+        types.SimpleNamespace(name=n, description="", inputSchema={})
+        for n in server_tools_names
+    ]
+
+    async def _fake_list(server_argv):
+        return server_tools
+
+    AnthropicCls, scripted = _make_scripted_anthropic(anthropic_responses)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_mod, "_async_list_tools", _fake_list)
+    monkeypatch.setattr(cli_mod, "Anthropic", AnthropicCls)
+    return scripted
+
+
+def test_reflect_after_final_text_run(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("done"),
+            _agent_text_response("yes, the task is complete"),
+        ],
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("ok", False)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--reflect", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "done" in captured.out
+    assert "Reflection: yes, the task is complete" in captured.out
+    assert len(scripted.create_calls) == 3
+    final_call_messages = scripted.create_calls[2]["messages"]
+    assert any(
+        msg.get("role") == "user"
+        and msg.get("content") == cli_mod.REFLECTION_PROMPT
+        for msg in final_call_messages
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row.get("mcp_decision") == "reflection" for row in rows)
+
+
+def test_reflect_after_max_turns(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_text_response("partial — needed more turns"),
+        ],
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("ok1", False), ("ok2", False)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        [
+            "--mcp-agent",
+            "--mcp-agent-max-turns",
+            "2",
+            "--reflect",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 7  # max-turns-reached unchanged
+    captured = capsys.readouterr()
+    assert "Reflection: partial — needed more turns" in captured.out
+    assert len(scripted.create_calls) == 3
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    decisions = [row.get("mcp_decision") for row in rows]
+    assert "max-turns-reached" in decisions
+    assert "reflection" in decisions
+
+
+def test_reflect_after_consecutive_errors(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _agent_text_response("no, errors blocked progress"),
+        ],
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("err1", True), ("err2", True)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--reflect", "--mcp-server", "fake", "task"])
+
+    assert rc == 8
+    captured = capsys.readouterr()
+    assert "Reflection: no, errors blocked progress" in captured.out
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    decisions = [row.get("mcp_decision") for row in rows]
+    assert "consecutive-error-abort" in decisions
+    assert "reflection" in decisions
+
+
+def test_reflect_after_user_abort(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("user stopped me before I could try"),
+        ],
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    rc = main(["--mcp-agent", "--reflect", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "aborted at turn 1" in captured.err
+    assert "Reflection: user stopped me before I could try" in captured.out
+
+
+def test_reflect_skipped_in_dry_run(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("done"),
+        ],
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(
+        [
+            "--mcp-agent",
+            "--mcp-agent-dry-run",
+            "--reflect",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "--reflect skipped in dry-run mode" in captured.err
+    assert "Reflection:" not in captured.out
+    # The dry-run consumed 2 scripted responses; reflection would be the 3rd, must NOT be called
+    assert len(scripted.create_calls) == 2
+
+
+def test_reflect_alone_rejected(monkeypatch, capsys):
+    rc = main(["--reflect", "task"])
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "only meaningful with --mcp-agent" in captured.err
+
+
+def test_reflect_skipped_after_hallucination(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch, ["echo"], [_agent_tool_use_response("rm", {"path": "/"})]
+    )
+    monkeypatch.setattr(cli_mod, "_async_call_tool", _async_call_tool_must_not_be_called)
+    monkeypatch.setattr("builtins.input", _input_must_not_be_called)
+
+    rc = main(["--mcp-agent", "--reflect", "--mcp-server", "fake", "task"])
+
+    assert rc == 5
+    captured = capsys.readouterr()
+    assert "Reflection:" not in captured.out
+    assert len(scripted.create_calls) == 1
+
+
+def test_reflect_api_error_does_not_change_exit_code(tmp_path, monkeypatch, capsys):
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_tool_use_response("echo", {"x": 2}, tu_id="t2"),
+            _FakeAPIError("reflection-api-down"),
+        ],
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("ok1", False), ("ok2", False)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(
+        [
+            "--mcp-agent",
+            "--mcp-agent-max-turns",
+            "2",
+            "--reflect",
+            "--mcp-server",
+            "fake",
+            "task",
+        ]
+    )
+
+    assert rc == 7  # max-turns exit unchanged despite reflection failure
+    captured = capsys.readouterr()
+    assert "warning: --reflect API call failed" in captured.err
+
+
+def test_reflect_handles_tool_use_in_response_gracefully(tmp_path, monkeypatch, capsys):
+    reflection_with_tool_use = types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(type="text", text="reasoning text"),
+            types.SimpleNamespace(type="tool_use", name="echo", input={}, id="bogus"),
+        ]
+    )
+    scripted = _setup_reflect_test(
+        monkeypatch,
+        ["echo"],
+        [
+            _agent_tool_use_response("echo", {"x": 1}, tu_id="t1"),
+            _agent_text_response("done"),
+            reflection_with_tool_use,
+        ],
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_async_call_tool",
+        _make_async_call_tool_scripted([("ok", False)]),
+    )
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+
+    rc = main(["--mcp-agent", "--reflect", "--mcp-server", "fake", "task"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Reflection: reasoning text" in captured.out
+    assert "model proposed a tool call" in captured.err
 
 
 def test_main_uses_default_model_from_config(tmp_path, monkeypatch):

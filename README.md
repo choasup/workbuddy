@@ -79,6 +79,8 @@ Defaults to 3 turns; `--mcp-agent-max-turns N` (capped at 5, hard) overrides. Ea
 
 Use `--mcp-agent-dry-run` to inspect the plan without executing: each turn prints `DRY RUN: would call ...` and Claude is fed a synthetic success result so the plan can continue. No `y/N` prompts, no real tool invocations. Cold-rejections (hallucinated tool name, multi-tool-per-turn, non-dict input) still fire — dry-run does not bypass any safety check.
 
+Use `--reflect` to add a single self-evaluation API call at the end of the run. Claude is shown the full transcript (without tools) and asked "did this complete the task?". The verdict is printed as `Reflection: <text>`. `--reflect` is skipped in `--mcp-agent-dry-run` mode (synthetic results would mislead). It does not change the exit code; if the reflection API call itself fails, a warning is printed and the agent's exit code stands.
+
 Every successful run is appended to `~/.workbuddy/log.md` with a UTC timestamp, the task, and the response. Set `WORKBUDDY_HOME` to relocate that log directory (e.g. `WORKBUDDY_HOME=/tmp/wb workbuddy "..."` writes to `/tmp/wb/log.md`).
 
 Each run also appends a compact JSON record to `~/.workbuddy/history.jsonl` (one object per line: `ts`, `task`, `model`, `response_chars`). The file rotates to the last 1000 entries so it stays bounded over time.
